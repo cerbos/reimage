@@ -7,8 +7,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"log"
-	"net/http"
+	"log" "net/http"
 	"os"
 	"regexp"
 	"strings"
@@ -38,6 +37,7 @@ var (
   imageJSONP:
   - "$.spec.image"
 `)
+	defaultTemplateStr = `{{ .RemotePath }}/{{ .Registry }}/{{ .Repository }}:{{ .DigestHex }}`
 )
 
 type remapper interface {
@@ -406,7 +406,7 @@ func main() {
 	matcher := flag.String("ignore", "^$", "ignore images matching this expression")
 	remotePath := flag.String("remote-path", "", "template for remapping imported images")
 	clobber := flag.Bool("clobber", false, "allow overwriting remote images")
-	remoteTemplateStr := flag.String("remote", "{{ .RemotePath }}/{{ .Registry }}/{{ .Repository }}:{{ .DigestHex }}", "template for remapping imported images")
+	remoteTemplateStr := flag.String("remote", defaultTemplateStr, "template for remapping imported images")
 	rulesConfigFile := flag.String("rules-config", "", "yaml definition of kind/image-path mappings")
 
 	flag.Parse()
