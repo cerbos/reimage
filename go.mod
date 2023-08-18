@@ -3,6 +3,7 @@ module github.com/tcolgate/reimage
 go 1.20
 
 require (
+	github.com/AsaiYusuke/jsonpath v1.6.0
 	github.com/google/go-containerregistry v0.15.2
 	k8s.io/api v0.27.4
 	k8s.io/apimachinery v0.27.4
@@ -11,9 +12,6 @@ require (
 )
 
 require (
-	github.com/AsaiYusuke/jsonpath v1.6.0 // indirect
-	github.com/PaesslerAG/gval v1.0.0 // indirect
-	github.com/PaesslerAG/jsonpath v0.1.1 // indirect
 	github.com/containerd/stargz-snapshotter/estargz v0.14.3 // indirect
 	github.com/docker/cli v23.0.5+incompatible // indirect
 	github.com/docker/distribution v2.8.1+incompatible // indirect
