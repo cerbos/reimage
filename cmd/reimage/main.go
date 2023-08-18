@@ -7,7 +7,7 @@ import (
 	"regexp"
 	"text/template"
 
-	"github.com/tcolgate/reimage"
+	"github.com/cerbos/reimage"
 
 	"k8s.io/apimachinery/pkg/util/yaml"
 )
@@ -24,6 +24,7 @@ var (
 func main() {
 	var err error
 
+	version := flag.Bool("V", false, "print version/build info")
 	matcher := flag.String("ignore", "^$", "ignore images matching this expression")
 	remotePath := flag.String("remote-path", "", "template for remapping imported images")
 	clobber := flag.Bool("clobber", false, "allow overwriting remote images")
@@ -31,6 +32,11 @@ func main() {
 	rulesConfigFile := flag.String("rules-config", "", "yaml definition of kind/image-path mappings")
 
 	flag.Parse()
+
+	if *version {
+		printVersion()
+		return
+	}
 
 	matchRe := regexp.MustCompile(*matcher)
 

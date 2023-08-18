@@ -1,0 +1,57 @@
+---
+snapshot:
+  name_template: '{{ incminor .Version }}-prerelease'
+
+builds:
+  - main: ./cmd/reimage
+    binary: reimage
+    id: "reimage"
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    goarm:
+      - "6"
+      - "7"
+    mod_timestamp: '{{ .CommitTimestamp }}'
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w -X main.Version={{.Version}} -X main.Commit={{.FullCommit}} -X main.BuildDate={{.Date}}
+archives:
+  - id: reimage
+    builds:
+      - reimage
+    name_template: 'cerbos_{{ .Version }}_{{ title .Os }}_{{ if eq .Arch "amd64" }}x86_64{{ else }}{{ .Arch }}{{ end }}{{ if .Arm }}v{{ .Arm }}{{ end }}'
+
+checksum:
+  name_template: 'checksums.txt'
+release:
+  header: |-
+    Reimage {{ .Version }}
+    ---------------------
+
+changelog:
+  sort: asc
+  groups:
+    - title: Features
+      regexp: 'feat(?:\(.+?\))?!?:'
+      order: 5
+    - title: Enhancements
+      regexp: 'enhancement(?:\(.+?\))?!?:'
+      order: 10
+    - title: Bug fixes
+      regexp: 'fix(?:\(.+?\))?!?:'
+      order: 15
+    - title: Documentation
+      regexp: 'docs(?:\(.+?\))?!?:'
+      order: 20
+    - title: Chores
+      regexp: 'chore(?:\(.+?\))?!?:'
+      order: 25
+    - title: Others
+      order: 100
