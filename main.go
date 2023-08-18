@@ -31,13 +31,8 @@ import (
 )
 
 var (
-	defaultRulesConfig = []byte(`
-- kind: Prometheus
-  apiVersion: monitoring.coreos.com/v1
-  imageJSONP:
-  - "$.spec.image"
-`)
-	defaultTemplateStr = `{{ .RemotePath }}/{{ .Registry }}/{{ .Repository }}:{{ .DigestHex }}`
+	// DefaultTemplateStr is a sensible default for importing images
+	DefaultTemplateStr = `{{ .RemotePath }}/{{ .Registry }}/{{ .Repository }}:{{ .DigestHex }}`
 )
 
 // A Remapper transforms OCI images references, and may perform side effects

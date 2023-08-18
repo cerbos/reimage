@@ -18,3 +18,16 @@ This is intended to:
 - Help with compliance by pulling all images from registries with image
   scanning
 - Help with the use of in-cluster binary authorization
+
+# Supporting Unknown K8S types
+
+If you need to find images in non-standard k8s you can provide rules
+to reimage to help it find image fields. You can pass these rules using
+the `-rules-config` CLI flag. 
+
+```yaml
+- kind: ^Prometheus$                     # Regexp matching the k8s Kind of objects
+  apiVersion: ^monitoring.coreos.com/v1$ # Regexp matching APIVersion of objects
+  imageJSONP:
+  - "$.spec.image"                       # JSONP queries that match image fields of a type
+```

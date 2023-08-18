@@ -12,13 +12,24 @@ import (
 	"k8s.io/apimachinery/pkg/util/yaml"
 )
 
+func mustCompile(cfgs []reimage.JSONImageFinderConfig) reimage.ImagesFinder {
+	res, err := reimage.CompileJSONImageFinders(cfgs)
+	if err != nil {
+		panic(err)
+	}
+	return res
+}
+
 var (
-	defaultRulesConfig = []byte(`
-- kind: Prometheus
-  apiVersion: monitoring.coreos.com/v1
-  imageJSONP:
-  - "$.spec.image"
-`)
+	defaultRulesConfig = []reimage.JSONImageFinderConfig{
+		{
+			Kind:       "^Prometheus$",
+			APIVersion: "^monitoring.coreos.com/v1$",
+			ImageJSONP: []string{"$.spec.image"},
+		},
+	}
+
+	_ = mustCompile(defaultRulesConfig)
 )
 
 func main() {
@@ -28,7 +39,7 @@ func main() {
 	matcher := flag.String("ignore", "^$", "ignore images matching this expression")
 	remotePath := flag.String("remote-path", "", "template for remapping imported images")
 	clobber := flag.Bool("clobber", false, "allow overwriting remote images")
-	remoteTemplateStr := flag.String("remote", "{{ .RemotePath }}/{{ .Registry }}/{{ .Repository }}:{{ .DigestHex }}", "template for remapping imported images")
+	remoteTemplateStr := flag.String("remote", reimage.DefaultTemplateStr, "template for remapping imported images")
 	rulesConfigFile := flag.String("rules-config", "", "yaml definition of kind/image-path mappings")
 
 	flag.Parse()
@@ -48,7 +59,7 @@ func main() {
 		log.Printf("copying disabled, (remote path and remote template must be set)")
 	}
 
-	ruleConfig := defaultRulesConfig
+	ruleConfig := []byte{}
 	if *rulesConfigFile != "" {
 		ruleConfig, err = os.ReadFile(*rulesConfigFile)
 		if err != nil {
@@ -62,6 +73,7 @@ func main() {
 		log.Fatalf("could not compile json matchers, %v", err)
 	}
 
+	jmCfgs = append(jmCfgs, defaultRulesConfig...)
 	jifs, err := reimage.CompileJSONImageFinders(jmCfgs)
 	if err != nil {
 		log.Fatalf("could not compile json matchers, %v", err)
