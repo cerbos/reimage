@@ -1,3 +1,4 @@
+// Package reimage provides tools for processing/updating the images listed in k8s manifests
 package reimage
 
 import (
@@ -39,24 +40,29 @@ var (
 	defaultTemplateStr = `{{ .RemotePath }}/{{ .Registry }}/{{ .Repository }}:{{ .DigestHex }}`
 )
 
+// A Remapper transforms OCI images references, and may perform side effects
 type Remapper interface {
 	ReMap(ref name.Reference) (name.Reference, error)
 }
 
+// RepoTemplateInput is the input provied to the RemoteTmpl of the RepoRemapper
 type RepoTemplateInput struct {
-	RemotePath string
-	Digest     string
-	DigestAlgo string
-	DigestHex  string
-	Tag        string
-	Registry   string
-	Repository string
+	RemotePath string // The request remote repository and registry prefix
+	Digest     string // The digest of the image
+	DigestAlgo string // The hash algorithm of the image digest
+	DigestHex  string // The hex string of the digest hash
+	Tag        string // The image tag (TODO(tcm): not used at the moment)
+	Registry   string // The image registry
+	Repository string // The image repository
 }
 
+// RepoRemapper is a Remapper implementation that copies images to
+// a remote registry/repository path. The new path is built using RemoteTmpl,
+// and the copy is performed using crane.Copy.
 type RepoRemapper struct {
-	RemotePath string
-	RemoteTmpl *template.Template
-	NoClobber  bool
+	RemotePath string             // used for the .RemotePath value in the template
+	RemoteTmpl *template.Template // template to build the final image string
+	NoClobber  bool               // If true, we'll refuse to overwrite remote images
 }
 
 func needsUpdate(newRef name.Reference, old name.Digest) (bool, error) {
@@ -138,11 +144,12 @@ func (t *RepoRemapper) ReMap(ref name.Reference) (name.Reference, error) {
 	return newRef, nil
 }
 
+// TagRemapper looks up the remote image and translates it to the current digest form
 type TagRemapper struct {
-	CheckOnly bool
+	CheckOnly bool // CheckOnly will ensure the remote image exists, but will leave it unchanged
 }
 
-// ReMap replaces textual tags with the image sha
+// ReMap looks up the remote image and translates it to the current digest form
 func (t *TagRemapper) ReMap(ref name.Reference) (name.Reference, error) {
 	desc, err := remote.Get(ref)
 	if err != nil {
@@ -158,8 +165,11 @@ func (t *TagRemapper) ReMap(ref name.Reference) (name.Reference, error) {
 	return tag, nil
 }
 
+// MultiRemapper applies each remapper, passing results from one to the next.
 type MultiRemapper []Remapper
 
+// ReMap applies each remapper, passing results from one to the next.
+// An error is returned as soon as any remapper fails
 func (t MultiRemapper) ReMap(ref name.Reference) (name.Reference, error) {
 	var err error
 	newRef := ref
@@ -173,17 +183,24 @@ func (t MultiRemapper) ReMap(ref name.Reference) (name.Reference, error) {
 	return newRef, nil
 }
 
+// ImagesFinder specifies any mechanism for finding images within any
+// k8s Unstructured data. Each entry in the map is an image name that was
+// found. Calling the Set method on the map values will replace the discovered
+// image name with a replacement.
 type ImagesFinder interface {
 	FindImages(obj *unstructured.Unstructured) (map[string]ImageSetters, error)
 }
 
-type Syncer struct {
+// RemapUpdater applies the Remapper to all images found in object passed to Update.
+// For Objects of unknown types the UnstructuredImagesFinder is used.
+// TODO(tcm): rename this thinger.
+type RemapUpdater struct {
 	Ignore                   *regexp.Regexp
 	UnstructuredImagesFinder ImagesFinder
 	Remapper                 Remapper
 }
 
-func (s *Syncer) remapImageString(img string) (string, error) {
+func (s *RemapUpdater) remapImageString(img string) (string, error) {
 	if img == "" || s.Ignore.MatchString(img) {
 		return img, nil
 	}
@@ -200,7 +217,7 @@ func (s *Syncer) remapImageString(img string) (string, error) {
 	return ref.String(), nil
 }
 
-func (s *Syncer) processContainers(cnts []corev1.Container) error {
+func (s *RemapUpdater) processContainers(cnts []corev1.Container) error {
 	for i, c := range cnts {
 		newImg, err := s.remapImageString(c.Image)
 		if err != nil {
@@ -214,7 +231,7 @@ func (s *Syncer) processContainers(cnts []corev1.Container) error {
 	return nil
 }
 
-func (s *Syncer) processPodSpec(spec *corev1.PodSpec) error {
+func (s *RemapUpdater) processPodSpec(spec *corev1.PodSpec) error {
 	var err error
 	err = s.processContainers(spec.Containers)
 	if err != nil {
@@ -227,7 +244,8 @@ func (s *Syncer) processPodSpec(spec *corev1.PodSpec) error {
 	return nil
 }
 
-func (s *Syncer) Update(obj runtime.Object) error {
+// Update applies the Remapper to all found images in the object
+func (s *RemapUpdater) Update(obj runtime.Object) error {
 	switch t := obj.(type) {
 	case *corev1.Pod:
 		return s.processPodSpec(&t.Spec)
@@ -321,6 +339,7 @@ func (s *Syncer) Update(obj runtime.Object) error {
 	return nil
 }
 
+// Updater is used by Process search for, and update, images in k8s objects
 type Updater interface {
 	Update(obj runtime.Object) error
 }
@@ -374,10 +393,12 @@ func Process(w io.Writer, r io.Reader, u Updater) error {
 
 type jsonPathFunc func(src interface{}) ([]interface{}, error)
 
+// JSONImageFinderConfig describes the settings for finding
+// arbitrary image fields in K8S types
 type JSONImageFinderConfig struct {
-	Kind       string   `yaml:"kind"`
-	APIVersion string   `yaml:"apiVersion"`
-	ImageJSONP []string `yaml:"imageJSONP"`
+	Kind       string   `json:"kind" yaml:"kind"`             // regexp to match k8s kind
+	APIVersion string   `json:"apiVersion" yaml:"apiVersion"` // regexp to match k8s apiVersion
+	ImageJSONP []string `json:"imageJSONP" yaml:"imageJSONP"` // jsonP queries to find individual image fields
 }
 
 type jsonImageFinder struct {
@@ -390,16 +411,21 @@ func (jm jsonImageFinder) matches(obj *unstructured.Unstructured) bool {
 	return jm.kind.MatchString(obj.GetKind()) && jm.apiVersion.MatchString(obj.GetAPIVersion())
 }
 
-type Setter func(obj interface{})
+// A Setter is used for setting the string description of an image
+type Setter func(img string)
+
+// ImageSetters is list of one of more Setters
 type ImageSetters []Setter
 
-func (ss ImageSetters) Set(obj interface{}) {
+// Set all the image setters in the list to the provided
+// image
+func (ss ImageSetters) Set(img string) {
 	for _, s := range ss {
-		s(obj)
+		s(img)
 	}
 }
 
-func (jm jsonImageFinder) findImageFields(obj *unstructured.Unstructured) (map[string]ImageSetters, error) {
+func (jm jsonImageFinder) FindImages(obj *unstructured.Unstructured) (map[string]ImageSetters, error) {
 	res := map[string]ImageSetters{}
 
 	for _, jpf := range jm.imageJSONPFns {
@@ -415,7 +441,7 @@ func (jm jsonImageFinder) findImageFields(obj *unstructured.Unstructured) (map[s
 			if !ok {
 				return nil, fmt.Errorf("jsonpath did not access a string, got %T", imgI)
 			}
-			res[imgStr] = append(res[imgStr], Setter(accessor.Set))
+			res[imgStr] = append(res[imgStr], Setter(func(img string) { accessor.Set(img) }))
 		}
 	}
 
@@ -427,13 +453,13 @@ type jsonImageFinders []*jsonImageFinder
 func (jms jsonImageFinders) FindImages(obj *unstructured.Unstructured) (map[string]ImageSetters, error) {
 	for i := range jms {
 		if jms[i].matches(obj) {
-			return jms[i].findImageFields(obj)
+			return jms[i].FindImages(obj)
 		}
 	}
 	return nil, nil
 }
 
-func CompileJSONImageFinder(cfg JSONImageFinderConfig) (*jsonImageFinder, error) {
+func compileJSONImageFinder(cfg JSONImageFinderConfig) (*jsonImageFinder, error) {
 	var err error
 	jm := jsonImageFinder{}
 
@@ -461,12 +487,12 @@ func CompileJSONImageFinder(cfg JSONImageFinderConfig) (*jsonImageFinder, error)
 	return &jm, nil
 }
 
-type JSONImageFinderConfigs []JSONImageFinderConfig
-
-func CompileJSONImageFinders(jmCfgs JSONImageFinderConfigs) (jsonImageFinders, error) {
+// CompileJSONImageFinders builds an ImagesFinder than can find image configuration
+// strings from arbitrary unstructured K8S JSON objects, using JSONP queries
+func CompileJSONImageFinders(jmCfgs []JSONImageFinderConfig) (ImagesFinder, error) {
 	var jms jsonImageFinders
 	for i, jmCfg := range jmCfgs {
-		jm, err := CompileJSONImageFinder(jmCfg)
+		jm, err := compileJSONImageFinder(jmCfg)
 		if err != nil {
 			return nil, fmt.Errorf("could not compile json matcher %d, %w", i, err)
 		}

@@ -50,7 +50,7 @@ func main() {
 		}
 	}
 
-	var jmCfgs reimage.JSONImageFinderConfigs
+	var jmCfgs []reimage.JSONImageFinderConfig
 	err = yaml.Unmarshal(ruleConfig, &jmCfgs)
 	if err != nil {
 		log.Fatalf("could not compile json matchers, %v", err)
@@ -78,7 +78,7 @@ func main() {
 		tagRemapper.CheckOnly = false
 	}
 
-	s := &reimage.Syncer{
+	s := &reimage.RemapUpdater{
 		Ignore:                   matchRe,
 		Remapper:                 rm,
 		UnstructuredImagesFinder: jifs,
