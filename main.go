@@ -1,14 +1,13 @@
-package main
+package reimage
 
 import (
 	"bufio"
 	"bytes"
 	"errors"
-	"flag"
 	"fmt"
 	"io"
-	"log" "net/http"
-	"os"
+	"log"
+	"net/http"
 	"regexp"
 	"strings"
 	"text/template"
@@ -40,11 +39,11 @@ var (
 	defaultTemplateStr = `{{ .RemotePath }}/{{ .Registry }}/{{ .Repository }}:{{ .DigestHex }}`
 )
 
-type remapper interface {
+type Remapper interface {
 	ReMap(ref name.Reference) (name.Reference, error)
 }
 
-type repoTemplateInput struct {
+type RepoTemplateInput struct {
 	RemotePath string
 	Digest     string
 	DigestAlgo string
@@ -54,10 +53,10 @@ type repoTemplateInput struct {
 	Repository string
 }
 
-type repoRemapper struct {
-	remotePath string
-	remoteTmpl *template.Template
-	noClobber  bool
+type RepoRemapper struct {
+	RemotePath string
+	RemoteTmpl *template.Template
+	NoClobber  bool
 }
 
 func needsUpdate(newRef name.Reference, old name.Digest) (bool, error) {
@@ -85,7 +84,7 @@ func needsUpdate(newRef name.Reference, old name.Digest) (bool, error) {
 
 // ReMap copies an image from the original registry to
 // a given new destination registry
-func (t *repoRemapper) ReMap(ref name.Reference) (name.Reference, error) {
+func (t *RepoRemapper) ReMap(ref name.Reference) (name.Reference, error) {
 	var err error
 	refCtx := ref.Context()
 
@@ -102,8 +101,8 @@ func (t *repoRemapper) ReMap(ref name.Reference) (name.Reference, error) {
 	default:
 	}
 
-	input := repoTemplateInput{
-		RemotePath: t.remotePath,
+	input := RepoTemplateInput{
+		RemotePath: t.RemotePath,
 		Repository: refCtx.RepositoryStr(),
 		Registry:   refCtx.Registry.String(),
 		Digest:     digestStr,
@@ -114,7 +113,7 @@ func (t *repoRemapper) ReMap(ref name.Reference) (name.Reference, error) {
 
 	newName := bytes.NewBufferString("")
 
-	err = t.remoteTmpl.Execute(newName, input)
+	err = t.RemoteTmpl.Execute(newName, input)
 	if err != nil {
 		return nil, err
 	}
@@ -130,7 +129,7 @@ func (t *repoRemapper) ReMap(ref name.Reference) (name.Reference, error) {
 	}
 
 	if update {
-		err = crane.Copy(ref.String(), newRef.String(), crane.WithNoClobber(t.noClobber))
+		err = crane.Copy(ref.String(), newRef.String(), crane.WithNoClobber(t.NoClobber))
 		if err != nil {
 			return nil, err
 		}
@@ -139,18 +138,18 @@ func (t *repoRemapper) ReMap(ref name.Reference) (name.Reference, error) {
 	return newRef, nil
 }
 
-type tagRemapper struct {
-	checkOnly bool
+type TagRemapper struct {
+	CheckOnly bool
 }
 
 // ReMap replaces textual tags with the image sha
-func (t *tagRemapper) ReMap(ref name.Reference) (name.Reference, error) {
+func (t *TagRemapper) ReMap(ref name.Reference) (name.Reference, error) {
 	desc, err := remote.Get(ref)
 	if err != nil {
 		return nil, err
 	}
 
-	if t.checkOnly {
+	if t.CheckOnly {
 		return ref, nil
 	}
 
@@ -159,9 +158,9 @@ func (t *tagRemapper) ReMap(ref name.Reference) (name.Reference, error) {
 	return tag, nil
 }
 
-type multiRemapper []remapper
+type MultiRemapper []Remapper
 
-func (t multiRemapper) ReMap(ref name.Reference) (name.Reference, error) {
+func (t MultiRemapper) ReMap(ref name.Reference) (name.Reference, error) {
 	var err error
 	newRef := ref
 	for _, rm := range t {
@@ -174,14 +173,18 @@ func (t multiRemapper) ReMap(ref name.Reference) (name.Reference, error) {
 	return newRef, nil
 }
 
-type syncer struct {
-	match        *regexp.Regexp
-	jsonMatchers jsonMatchers
-	remapper     remapper
+type ImagesFinder interface {
+	FindImages(obj *unstructured.Unstructured) (map[string]ImageSetters, error)
 }
 
-func (s *syncer) remapImageString(img string) (string, error) {
-	if img == "" || s.match.MatchString(img) {
+type Syncer struct {
+	Ignore                   *regexp.Regexp
+	UnstructuredImagesFinder ImagesFinder
+	Remapper                 Remapper
+}
+
+func (s *Syncer) remapImageString(img string) (string, error) {
+	if img == "" || s.Ignore.MatchString(img) {
 		return img, nil
 	}
 	ref, err := name.ParseReference(img)
@@ -189,7 +192,7 @@ func (s *syncer) remapImageString(img string) (string, error) {
 		return "", fmt.Errorf("could not parse image ref %s, %w", img, err)
 	}
 
-	ref, err = s.remapper.ReMap(ref)
+	ref, err = s.Remapper.ReMap(ref)
 	if err != nil {
 		return "", fmt.Errorf("could not remap image %s, %w", img, err)
 	}
@@ -197,7 +200,7 @@ func (s *syncer) remapImageString(img string) (string, error) {
 	return ref.String(), nil
 }
 
-func (s *syncer) processContainers(cnts []corev1.Container) error {
+func (s *Syncer) processContainers(cnts []corev1.Container) error {
 	for i, c := range cnts {
 		newImg, err := s.remapImageString(c.Image)
 		if err != nil {
@@ -211,7 +214,7 @@ func (s *syncer) processContainers(cnts []corev1.Container) error {
 	return nil
 }
 
-func (s *syncer) processPodSpec(spec *corev1.PodSpec) error {
+func (s *Syncer) processPodSpec(spec *corev1.PodSpec) error {
 	var err error
 	err = s.processContainers(spec.Containers)
 	if err != nil {
@@ -224,24 +227,80 @@ func (s *syncer) processPodSpec(spec *corev1.PodSpec) error {
 	return nil
 }
 
-func (s *syncer) update(obj runtime.Object) error {
+func (s *Syncer) Update(obj runtime.Object) error {
 	switch t := obj.(type) {
 	case *corev1.Pod:
 		return s.processPodSpec(&t.Spec)
+	case *corev1.PodList:
+		for i, l := range t.Items {
+			p := l
+			if err := s.processPodSpec(&p.Spec); err != nil {
+				return err
+			}
+			t.Items[i] = p
+		}
 	case *appsv1.ReplicaSet:
 		return s.processPodSpec(&t.Spec.Template.Spec)
+	case *appsv1.ReplicaSetList:
+		for i, l := range t.Items {
+			p := l
+			if err := s.processPodSpec(&p.Spec.Template.Spec); err != nil {
+				return err
+			}
+			t.Items[i] = p
+		}
 	case *appsv1.DaemonSet:
 		return s.processPodSpec(&t.Spec.Template.Spec)
+	case *appsv1.DaemonSetList:
+		for i, l := range t.Items {
+			p := l
+			if err := s.processPodSpec(&p.Spec.Template.Spec); err != nil {
+				return err
+			}
+			t.Items[i] = p
+		}
 	case *appsv1.Deployment:
 		return s.processPodSpec(&t.Spec.Template.Spec)
+	case *appsv1.DeploymentList:
+		for i, l := range t.Items {
+			p := l
+			if err := s.processPodSpec(&p.Spec.Template.Spec); err != nil {
+				return err
+			}
+			t.Items[i] = p
+		}
 	case *appsv1.StatefulSet:
 		return s.processPodSpec(&t.Spec.Template.Spec)
+	case *appsv1.StatefulSetList:
+		for i, l := range t.Items {
+			p := l
+			if err := s.processPodSpec(&p.Spec.Template.Spec); err != nil {
+				return err
+			}
+			t.Items[i] = p
+		}
 	case *batchv1.Job:
 		return s.processPodSpec(&t.Spec.Template.Spec)
+	case *batchv1.JobList:
+		for i, l := range t.Items {
+			p := l
+			if err := s.processPodSpec(&p.Spec.Template.Spec); err != nil {
+				return err
+			}
+			t.Items[i] = p
+		}
 	case *batchv1.CronJob:
 		return s.processPodSpec(&t.Spec.JobTemplate.Spec.Template.Spec)
+	case *batchv1.CronJobList:
+		for i, l := range t.Items {
+			p := l
+			if err := s.processPodSpec(&p.Spec.JobTemplate.Spec.Template.Spec); err != nil {
+				return err
+			}
+			t.Items[i] = p
+		}
 	case *unstructured.Unstructured:
-		matches, err := s.jsonMatchers.match(t)
+		matches, err := s.UnstructuredImagesFinder.FindImages(t)
 		if err != nil {
 			return err
 		}
@@ -262,11 +321,13 @@ func (s *syncer) update(obj runtime.Object) error {
 	return nil
 }
 
-type updater interface {
-	update(obj runtime.Object) error
+type Updater interface {
+	Update(obj runtime.Object) error
 }
 
-func process(w io.Writer, r io.Reader, u updater) error {
+// Process runs the Updater for each kubernetes resource found in the file.
+// Unknown field are converted to
+func Process(w io.Writer, r io.Reader, u Updater) error {
 	yr := yaml.NewYAMLReader(bufio.NewReader(r))
 
 	decoder := scheme.Codecs.UniversalDeserializer()
@@ -300,7 +361,7 @@ func process(w io.Writer, r io.Reader, u updater) error {
 			}
 		}
 
-		err = u.update(obj)
+		err = u.Update(obj)
 		if err != nil {
 			gvk := obj.GetObjectKind().GroupVersionKind()
 			return fmt.Errorf("error updating input %#v, %w", gvk, err)
@@ -313,33 +374,33 @@ func process(w io.Writer, r io.Reader, u updater) error {
 
 type jsonPathFunc func(src interface{}) ([]interface{}, error)
 
-type JSONMatchConfig struct {
+type JSONImageFinderConfig struct {
 	Kind       string   `yaml:"kind"`
 	APIVersion string   `yaml:"apiVersion"`
 	ImageJSONP []string `yaml:"imageJSONP"`
 }
 
-type jsonMatcher struct {
+type jsonImageFinder struct {
 	kind          *regexp.Regexp
 	apiVersion    *regexp.Regexp
 	imageJSONPFns []jsonPathFunc
 }
 
-func (jm jsonMatcher) matches(obj *unstructured.Unstructured) bool {
+func (jm jsonImageFinder) matches(obj *unstructured.Unstructured) bool {
 	return jm.kind.MatchString(obj.GetKind()) && jm.apiVersion.MatchString(obj.GetAPIVersion())
 }
 
-type setter func(obj interface{})
-type setters []setter
+type Setter func(obj interface{})
+type ImageSetters []Setter
 
-func (ss setters) Set(obj interface{}) {
+func (ss ImageSetters) Set(obj interface{}) {
 	for _, s := range ss {
 		s(obj)
 	}
 }
 
-func (jm jsonMatcher) findImageFields(obj *unstructured.Unstructured) (map[string]setters, error) {
-	res := map[string]setters{}
+func (jm jsonImageFinder) findImageFields(obj *unstructured.Unstructured) (map[string]ImageSetters, error) {
+	res := map[string]ImageSetters{}
 
 	for _, jpf := range jm.imageJSONPFns {
 		vs, err := jpf((map[string]interface{})(obj.Object))
@@ -354,16 +415,16 @@ func (jm jsonMatcher) findImageFields(obj *unstructured.Unstructured) (map[strin
 			if !ok {
 				return nil, fmt.Errorf("jsonpath did not access a string, got %T", imgI)
 			}
-			res[imgStr] = append(res[imgStr], setter(accessor.Set))
+			res[imgStr] = append(res[imgStr], Setter(accessor.Set))
 		}
 	}
 
 	return res, nil
 }
 
-type jsonMatchers []*jsonMatcher
+type jsonImageFinders []*jsonImageFinder
 
-func (jms jsonMatchers) match(obj *unstructured.Unstructured) (map[string]setters, error) {
+func (jms jsonImageFinders) FindImages(obj *unstructured.Unstructured) (map[string]ImageSetters, error) {
 	for i := range jms {
 		if jms[i].matches(obj) {
 			return jms[i].findImageFields(obj)
@@ -372,9 +433,9 @@ func (jms jsonMatchers) match(obj *unstructured.Unstructured) (map[string]setter
 	return nil, nil
 }
 
-func compileJSONMatch(cfg JSONMatchConfig) (*jsonMatcher, error) {
+func CompileJSONImageFinder(cfg JSONImageFinderConfig) (*jsonImageFinder, error) {
 	var err error
-	jm := jsonMatcher{}
+	jm := jsonImageFinder{}
 
 	jm.kind, err = regexp.Compile(cfg.Kind)
 	if err != nil {
@@ -400,75 +461,16 @@ func compileJSONMatch(cfg JSONMatchConfig) (*jsonMatcher, error) {
 	return &jm, nil
 }
 
-func main() {
-	var err error
+type JSONImageFinderConfigs []JSONImageFinderConfig
 
-	matcher := flag.String("ignore", "^$", "ignore images matching this expression")
-	remotePath := flag.String("remote-path", "", "template for remapping imported images")
-	clobber := flag.Bool("clobber", false, "allow overwriting remote images")
-	remoteTemplateStr := flag.String("remote", defaultTemplateStr, "template for remapping imported images")
-	rulesConfigFile := flag.String("rules-config", "", "yaml definition of kind/image-path mappings")
-
-	flag.Parse()
-
-	matchRe := regexp.MustCompile(*matcher)
-
-	var remoteTmpl *template.Template
-	if *remotePath != "" && *remoteTemplateStr != "" {
-		remoteTmpl = template.New("remote")
-		remoteTmpl = template.Must(remoteTmpl.Parse(*remoteTemplateStr))
-	} else {
-		log.Printf("copying disabled, (remote path and remote template must be set)")
-	}
-
-	ruleConfig := defaultRulesConfig
-	if *rulesConfigFile != "" {
-		ruleConfig, err = os.ReadFile(*rulesConfigFile)
+func CompileJSONImageFinders(jmCfgs JSONImageFinderConfigs) (jsonImageFinders, error) {
+	var jms jsonImageFinders
+	for i, jmCfg := range jmCfgs {
+		jm, err := CompileJSONImageFinder(jmCfg)
 		if err != nil {
-			log.Fatalf("failed reading json matcher definitions, %v", err)
-		}
-	}
-
-	var jmCfgs []JSONMatchConfig
-	err = yaml.Unmarshal(ruleConfig, &jmCfgs)
-	if err != nil {
-		log.Fatalf("could not compile json matchers, %v", err)
-	}
-
-	var jms jsonMatchers
-	for _, jmCfg := range jmCfgs {
-		jm, err := compileJSONMatch(jmCfg)
-		if err != nil {
-			log.Fatalf("could not compile json matchers, %v", err)
+			return nil, fmt.Errorf("could not compile json matcher %d, %w", i, err)
 		}
 		jms = append(jms, jm)
 	}
-
-	tagRemapper := &tagRemapper{
-		checkOnly: true,
-	}
-
-	rm := multiRemapper{
-		tagRemapper,
-	}
-
-	if remoteTmpl != nil {
-		rm = append(rm, &repoRemapper{
-			remotePath: *remotePath,
-			remoteTmpl: remoteTmpl,
-			noClobber:  !(*clobber),
-		})
-		tagRemapper.checkOnly = false
-	}
-
-	s := &syncer{
-		match:        matchRe,
-		remapper:     rm,
-		jsonMatchers: jms,
-	}
-
-	err = process(os.Stdout, os.Stdin, s)
-	if err != nil {
-		log.Fatalf("could not update input, %v", err)
-	}
+	return jms, nil
 }

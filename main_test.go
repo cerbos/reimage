@@ -1,4 +1,4 @@
-package main
+package reimage
 
 import (
 	"bytes"
@@ -29,7 +29,7 @@ type testUpdater struct {
 	calledWith []runtime.Object
 }
 
-func (tu *testUpdater) update(obj runtime.Object) error {
+func (tu *testUpdater) Update(obj runtime.Object) error {
 	tu.calledWith = append(tu.calledWith, obj)
 	return tu.err
 }
@@ -40,7 +40,7 @@ func TestProcess_invalid_yaml(t *testing.T) {
 `
 	out := bytes.NewBuffer([]byte{})
 	tu := &testUpdater{}
-	err := process(out, bytes.NewBufferString(in), tu)
+	err := Process(out, bytes.NewBufferString(in), tu)
 	if err == nil {
 		t.Fatalf("expected invalid json to faili")
 	}
@@ -55,7 +55,7 @@ func TestProcess_empty_yamls(t *testing.T) {
 `
 	out := bytes.NewBuffer([]byte{})
 	tu := &testUpdater{}
-	err := process(out, bytes.NewBufferString(in), tu)
+	err := Process(out, bytes.NewBufferString(in), tu)
 	if err != nil {
 		t.Fatalf("empty yaml blobs should parse")
 	}
@@ -69,7 +69,7 @@ noKind: nonehere
 `
 	out := bytes.NewBuffer([]byte{})
 	tu := &testUpdater{}
-	err := process(out, bytes.NewBufferString(in), tu)
+	err := Process(out, bytes.NewBufferString(in), tu)
 	if err != nil {
 		t.Fatalf("non-kube yaml is passed on")
 	}
@@ -92,7 +92,7 @@ spec:
 
 	out := bytes.NewBuffer([]byte{})
 	tu := &testUpdater{}
-	err := process(out, bytes.NewBufferString(in), tu)
+	err := Process(out, bytes.NewBufferString(in), tu)
 	if err != nil {
 		t.Fatalf("non-kube yaml is passed on")
 	}
@@ -128,7 +128,7 @@ spec:
 		err: te,
 	}
 
-	err := process(out, bytes.NewBufferString(in), tu)
+	err := Process(out, bytes.NewBufferString(in), tu)
 	if err == nil {
 		t.Fatalf("expected an error")
 	}
