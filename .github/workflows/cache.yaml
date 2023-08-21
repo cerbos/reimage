@@ -45,4 +45,4 @@ jobs:
 
       - name: Warm cache
         if: ${{ steps.setup.outputs.cache_hit != 'true' }}
-        run: make warm-cache
+        run: go build ./...
