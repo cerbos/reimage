@@ -3,10 +3,20 @@ package reimage
 import (
 	"bytes"
 	"errors"
+	"fmt"
+	"log"
+	"net/http/httptest"
+	"net/url"
 	"strconv"
 	"strings"
 	"testing"
+	"text/template"
 
+	"github.com/google/go-containerregistry/pkg/crane"
+	"github.com/google/go-containerregistry/pkg/name"
+	"github.com/google/go-containerregistry/pkg/registry"
+	"github.com/google/go-containerregistry/pkg/v1/random"
+	"github.com/google/go-containerregistry/pkg/v1/remote"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 )
@@ -304,3 +314,166 @@ func TestThing(t *testing.T) {
 	t.Logf("u2: %s", u2)
 }
 */
+
+type registryTestLogger struct {
+	t *testing.T
+}
+
+func (rtl *registryTestLogger) Write(p []byte) (n int, err error) {
+	rtl.t.Log(strings.TrimSpace(string(p)))
+	return len(p), nil
+}
+
+func newTestRegistryLogger(t *testing.T) registry.Option {
+	rtl := &registryTestLogger{t: t}
+	return registry.Logger(log.New(rtl, "", 0))
+}
+
+func TestTagRemapper(t *testing.T) {
+	s1 := httptest.NewServer(registry.New(newTestRegistryLogger(t)))
+	defer s1.Close()
+	u1, err := url.Parse(s1.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	src := fmt.Sprintf("%s/test/img1", u1.Host)
+
+	// Expected values.
+	img, err := random.Image(1024, 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Load up the registry.
+	if err := crane.Push(img, src); err != nil {
+		t.Fatal(err)
+	}
+
+	imgHash, _ := img.Digest()
+
+	if err := crane.Tag(src, "latest"); err != nil {
+		t.Fatal(err)
+	}
+
+	taggedSrc := fmt.Sprintf("%s/test/img1:latest", u1.Host)
+	latestTag, _ := name.ParseReference(taggedSrc)
+
+	t.Logf("u1: %s", u1)
+	t.Logf("taggedSrc: %s", taggedSrc)
+
+	tr := &TagRemapper{}
+
+	newTag, err := tr.ReMap(latestTag)
+	if err != nil {
+		t.Fatalf("remap failed, %v", err)
+	}
+	t.Logf("newTag: %v", newTag)
+
+	newDig, ok := newTag.(name.Digest)
+	if !ok {
+		t.Logf("newTag was not a digest, got %T", newTag)
+	}
+
+	if newDig.DigestStr() != imgHash.String() {
+		t.Logf("latest did not remap to correct digest:\n  exp: %s\n  got: %s\n", imgHash, newDig.DigestStr())
+	}
+
+	tr.CheckOnly = true
+	newTag, err = tr.ReMap(latestTag)
+	if err != nil {
+		t.Fatalf("checkOnly remap failed, %v", err)
+	}
+
+	if newTag.String() != latestTag.String() {
+		t.Fatalf("checkOnly altered tag:\n  exp: %s\n  got: %s", latestTag, newTag)
+	}
+}
+
+func TestRepoRemapper(t *testing.T) {
+	rl := newTestRegistryLogger(t)
+	s1 := httptest.NewServer(registry.New(rl))
+	defer s1.Close()
+	u1, err := url.Parse(s1.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	s2 := httptest.NewServer(registry.New(rl))
+	defer s1.Close()
+	u2, err := url.Parse(s2.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	src := fmt.Sprintf("%s/test/img1", u1.Host)
+
+	// Expected values.
+	img, err := random.Image(1024, 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Load up the registry.
+	if err := crane.Push(img, src); err != nil {
+		t.Fatal(err)
+	}
+
+	imgDig, _ := img.Digest()
+
+	if err := crane.Tag(src, "latest"); err != nil {
+		t.Fatal(err)
+	}
+
+	imgTag, _ := name.ParseReference(src)
+	imgDesc, _ := remote.Get(imgTag)
+	digTag := imgTag.Context().Registry.Repo(imgTag.Context().RepositoryStr()).Digest(imgDesc.Digest.String())
+
+	t.Logf("img digtest tag: %s", digTag)
+
+	tmplStr := template.Must(template.New("test").Parse(`{{ .RemotePath }}/{{ .Repository }}:{{ .DigestHex }}`))
+
+	rr := &RepoRemapper{
+		RemotePath: u2.Host + "/imported",
+		RemoteTmpl: tmplStr,
+		NoClobber:  false,
+	}
+
+	newTag, err := rr.ReMap(digTag)
+	if err != nil {
+		t.Fatalf("remap failed, %v", err)
+	}
+	t.Logf("newTag: %v", newTag)
+
+	newImgDesc, err := remote.Get(newTag)
+	if err != nil {
+		t.Fatalf("could not get copied image, %v", err)
+	}
+
+	newDigest := newImgDesc.Digest.String()
+	oldDigest := imgDig.String()
+
+	if newDigest != oldDigest {
+		t.Fatalf("new image digest != old:\n  old: %s\n  new: %s\n", oldDigest, newDigest)
+	}
+}
+
+/*
+appsv1 "k8s.io/api/apps/v1"
+batchv1 "k8s.io/api/batch/v1"
+corev1 "k8s.io/api/core/v1"
+"k8s.io/client-go/kubernetes/scheme"
+*/
+func TestRemapUpdater(t *testing.T) {
+	var tests = []struct {
+		obj runtime.Object
+	}{}
+	for i, tt := range tests {
+		tt := tt
+		t.Run(strconv.Itoa(i), func(t *testing.T) {
+			ru := RemapUpdater{}
+			err := ru.Update(tt.obj)
+			if err != nil {
+				t.Fatalf("RemapUpdater failed, %v", err)
+			}
+		})
+	}
+}
