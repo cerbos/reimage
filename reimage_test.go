@@ -3,9 +3,11 @@ package reimage
 import (
 	"bytes"
 	"errors"
+	"strconv"
 	"strings"
 	"testing"
 
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 )
 
@@ -81,7 +83,6 @@ func trimCompare(a, b string) bool {
 		strings.TrimSpace(b),
 	) == 0
 }
-
 func TestProcess_unknownk8s(t *testing.T) {
 	// Helm templates frequently produce these
 	in := `
@@ -134,6 +135,136 @@ spec:
 	}
 	if !errors.Is(err, te) {
 		t.Fatalf("expected a testError")
+	}
+}
+
+func TestCompileJSONImageFinders(t *testing.T) {
+	var tests = []struct {
+		in          []JSONImageFinderConfig
+		expectedErr string
+		dataIn      map[string]interface{}
+		expectCnt   int
+	}{
+		{
+			[]JSONImageFinderConfig{
+				{
+					Kind:       "^(",
+					APIVersion: "",
+					ImageJSONP: []string{},
+				},
+			},
+			"could not compile json matcher 0, failed to compile Kind regexp, error parsing regexp: missing closing ): `^(`",
+			nil,
+			0,
+		},
+		{
+			[]JSONImageFinderConfig{
+				{
+					Kind:       "",
+					APIVersion: "^(",
+					ImageJSONP: []string{},
+				},
+			},
+			"could not compile json matcher 0, failed to compile APIVersion regexp, error parsing regexp: missing closing ): `^(`",
+			nil,
+			0,
+		},
+		{
+			[]JSONImageFinderConfig{
+				{
+					Kind:       "",
+					APIVersion: "",
+					ImageJSONP: []string{".. .. .."},
+				},
+			},
+			"could not compile json matcher 0, failed to parse jsonpath expression \".. .. ..\", invalid syntax (position=0, reason=unrecognized input, near=.. .. ..)",
+			nil,
+			0,
+		},
+		{
+			[]JSONImageFinderConfig{
+				{
+					Kind:       "^SomeCRD$",
+					APIVersion: "^somestartup.io$",
+					ImageJSONP: []string{"$.spec.image"},
+				},
+			},
+			"",
+			map[string]interface{}{
+				"kind":       "OtherCRD",
+				"apiVersion": "somestartup.io",
+				"spec": map[string]interface{}{
+					"image": "someimage",
+				},
+			},
+			0,
+		},
+		{
+			[]JSONImageFinderConfig{
+				{
+					Kind:       "^SomeCRD$",
+					APIVersion: "^somestartup.io$",
+					ImageJSONP: []string{"$.spec.image"},
+				},
+			},
+			"",
+			map[string]interface{}{
+				"kind":       "SomeCRD",
+				"apiVersion": "otherstartup.io",
+				"spec": map[string]interface{}{
+					"image": "someimage",
+				},
+			},
+			0,
+		},
+		{
+			[]JSONImageFinderConfig{
+				{
+					Kind:       "^SomeCRD$",
+					APIVersion: "^somestartup.io$",
+					ImageJSONP: []string{"$.spec.image"},
+				},
+			},
+			"",
+			map[string]interface{}{
+				"kind":       "SomeCRD",
+				"apiVersion": "somestartup.io",
+				"spec": map[string]interface{}{
+					"image": "someimage",
+				},
+			},
+			1,
+		},
+	}
+	for i, tt := range tests {
+		tt := tt
+		t.Run(strconv.Itoa(i), func(t *testing.T) {
+			mtchr, err := CompileJSONImageFinders(tt.in)
+			if tt.expectedErr == "" && err != nil {
+				t.Fatalf("no error expected, but got %v", err)
+			}
+
+			if tt.expectedErr != "" && err == nil {
+				t.Fatalf("no error, but expected error was %q", tt.expectedErr)
+			}
+
+			if err != nil && err.Error() != tt.expectedErr {
+				t.Fatalf("wrong error:\n  exp: %s\n  got: %v\n", tt.expectedErr, err)
+			}
+
+			if err != nil || tt.expectedErr != "" {
+				return
+			}
+
+			obj := &unstructured.Unstructured{Object: tt.dataIn}
+			ms, err := mtchr.FindImages(obj)
+			if err != nil {
+				t.Fatalf("master errored, %v", err)
+			}
+			if len(ms) != tt.expectCnt {
+				t.Fatalf("expected %d matches, got %d", tt.expectCnt, len(ms))
+			}
+		})
 	}
 }
 
