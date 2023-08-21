@@ -12,26 +12,6 @@ import (
 	"k8s.io/apimachinery/pkg/util/yaml"
 )
 
-func mustCompile(cfgs []reimage.JSONImageFinderConfig) reimage.ImagesFinder {
-	res, err := reimage.CompileJSONImageFinders(cfgs)
-	if err != nil {
-		panic(err)
-	}
-	return res
-}
-
-var (
-	defaultRulesConfig = []reimage.JSONImageFinderConfig{
-		{
-			Kind:       "^Prometheus$",
-			APIVersion: "^monitoring.coreos.com/v1$",
-			ImageJSONP: []string{"$.spec.image"},
-		},
-	}
-
-	_ = mustCompile(defaultRulesConfig)
-)
-
 func main() {
 	var err error
 
@@ -73,7 +53,7 @@ func main() {
 		log.Fatalf("could not compile json matchers, %v", err)
 	}
 
-	jmCfgs = append(jmCfgs, defaultRulesConfig...)
+	jmCfgs = append(jmCfgs, reimage.DefaultRulesConfig...)
 	jifs, err := reimage.CompileJSONImageFinders(jmCfgs)
 	if err != nil {
 		log.Fatalf("could not compile json matchers, %v", err)

@@ -30,9 +30,26 @@ import (
 	"k8s.io/cli-runtime/pkg/printers"
 )
 
+func mustCompile(cfgs []JSONImageFinderConfig) ImagesFinder {
+	res, err := CompileJSONImageFinders(cfgs)
+	if err != nil {
+		panic(err)
+	}
+	return res
+}
+
 var (
 	// DefaultTemplateStr is a sensible default for importing images
 	DefaultTemplateStr = `{{ .RemotePath }}/{{ .Registry }}/{{ .Repository }}:{{ .DigestHex }}`
+	DefaultRulesConfig = []JSONImageFinderConfig{
+		{
+			Kind:       "^Prometheus$",
+			APIVersion: "^monitoring.coreos.com/v1$",
+			ImageJSONP: []string{"$.spec.image"},
+		},
+	}
+
+	_ = mustCompile(DefaultRulesConfig)
 )
 
 // A Remapper transforms OCI images references, and may perform side effects
