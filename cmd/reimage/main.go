@@ -5,7 +5,7 @@ package main
 
 import (
 	"flag"
-	"log"
+	"log/slog"
 	"os"
 	"regexp"
 	"text/template"
@@ -24,8 +24,23 @@ func main() {
 	clobber := flag.Bool("clobber", false, "allow overwriting remote images")
 	remoteTemplateStr := flag.String("remote", reimage.DefaultTemplateStr, "template for remapping imported images")
 	rulesConfigFile := flag.String("rules-config", "", "yaml definition of kind/image-path mappings")
-
+	dryRun := flag.Bool("dryrun", false, "only log actions")
+	debug := flag.Bool("debug", false, "enable debug logging")
 	flag.Parse()
+
+	slvl := &slog.LevelVar{}
+	slvl.Set(slog.LevelInfo)
+	if *debug {
+		slvl.Set(slog.LevelDebug)
+	}
+
+	log := slog.New(
+		slog.NewTextHandler(
+			os.Stderr,
+			&slog.HandlerOptions{
+				Level: slvl,
+			}),
+	)
 
 	if *version {
 		printVersion()
@@ -39,31 +54,35 @@ func main() {
 		remoteTmpl = template.New("remote")
 		remoteTmpl = template.Must(remoteTmpl.Parse(*remoteTemplateStr))
 	} else {
-		log.Printf("copying disabled, (remote path and remote template must be set)")
+		log.Info("copying disabled, (remote path and remote template must be set)")
 	}
 
 	ruleConfig := []byte{}
 	if *rulesConfigFile != "" {
 		ruleConfig, err = os.ReadFile(*rulesConfigFile)
 		if err != nil {
-			log.Fatalf("failed reading json matcher definitions, %v", err)
+			log.Error("failed reading json matcher definitions", slog.String("err", err.Error()))
+			os.Exit(1)
 		}
 	}
 
 	var jmCfgs []reimage.JSONImageFinderConfig
 	err = yaml.Unmarshal(ruleConfig, &jmCfgs)
 	if err != nil {
-		log.Fatalf("could not compile json matchers, %v", err)
+		log.Error("could not compile json matchers", slog.String("err", err.Error()))
+		os.Exit(1)
 	}
 
 	jmCfgs = append(jmCfgs, reimage.DefaultRulesConfig...)
 	jifs, err := reimage.CompileJSONImageFinders(jmCfgs)
 	if err != nil {
-		log.Fatalf("could not compile json matchers, %v", err)
+		log.Error("could not compile json matchers", slog.String("err", err.Error()))
+		os.Exit(1)
 	}
 
 	tagRemapper := &reimage.TagRemapper{
 		CheckOnly: true,
+		Logger:    log,
 	}
 
 	rm := reimage.MultiRemapper{
@@ -75,6 +94,8 @@ func main() {
 			RemotePath: *remotePath,
 			RemoteTmpl: remoteTmpl,
 			NoClobber:  !(*clobber),
+			DryRun:     (*dryRun),
+			Logger:     log,
 		})
 		tagRemapper.CheckOnly = false
 	}
@@ -83,10 +104,12 @@ func main() {
 		Ignore:                   matchRe,
 		Remapper:                 rm,
 		UnstructuredImagesFinder: jifs,
+		Logger:                   log,
 	}
 
 	err = reimage.Process(os.Stdout, os.Stdin, s)
 	if err != nil {
-		log.Fatalf("could not update input, %v", err)
+		log.Error("could not update input", slog.String("err", err.Error()))
+		os.Exit(1)
 	}
 }

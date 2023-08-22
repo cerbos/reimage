@@ -7,10 +7,11 @@ package reimage
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"net/http"
 	"regexp"
 	"strings"
@@ -54,6 +55,15 @@ var (
 
 	_ = mustCompile(DefaultRulesConfig)
 )
+
+// Logger is a subset of the slog interface
+type Logger interface {
+	Debug(msg string, args ...any)
+	Info(msg string, args ...any)
+}
+
+// DefaultLogger is a quick shortcut to the slog default logger
+var DefaultLogger = Logger(slog.Default())
 
 type HistoryItem struct {
 	Ref name.Reference
@@ -109,15 +119,20 @@ type RepoRemapper struct {
 	RemotePath string             // used for the .RemotePath value in the template
 	RemoteTmpl *template.Template // template to build the final image string
 	NoClobber  bool               // If true, we'll refuse to overwrite remote images
+	DryRun     bool               // If true, don't perform the any actual copies
+
+	Logger
 }
 
-func needsUpdate(newRef name.Reference, old name.Digest) (bool, error) {
+func needsUpdate(ctx context.Context, newRef name.Reference, old name.Digest, log Logger) (bool, error) {
 	digest, err := crane.Digest(newRef.String())
 
 	var terr *transport.Error
 	if errors.As(err, &terr) {
 		if terr.StatusCode == http.StatusNotFound {
-			log.Printf("image tag not pushed yet, %s", newRef)
+			if log != nil {
+				log.Info("image tag not pushed yet", slog.String("ref", newRef.String()))
+			}
 			return true, nil
 		}
 		return false, terr
@@ -126,17 +141,22 @@ func needsUpdate(newRef name.Reference, old name.Digest) (bool, error) {
 	}
 
 	if digest == old.DigestStr() {
-		log.Printf("image tag already exists at current local digest, %s", newRef)
+		if log != nil {
+			log.Debug("image tag already exists at current local digest, %s", slog.String("ref", newRef.String()))
+		}
 		return false, nil
 	}
 
-	log.Printf("current remote image tag does not match local digest, %s", newRef)
+	if log != nil {
+		log.Info("current remote image tag does not match local digest, %s", slog.String("ref", newRef.String()))
+	}
 	return true, nil
 }
 
 // ReMap copies an image from the original registry to
 // a given new destination registry
 func (t *RepoRemapper) ReMap(h *History) error {
+	ctx := context.TODO()
 	var err error
 	ref := h.LatestRef()
 	refCtx := ref.Context()
@@ -178,12 +198,18 @@ func (t *RepoRemapper) ReMap(h *History) error {
 
 	h.Add(newRef, "remapped to new repo")
 
-	update, err := needsUpdate(newRef, digest)
+	update, err := needsUpdate(ctx, newRef, digest, t)
 	if err != nil {
 		return err
 	}
 
 	if update {
+		if t.DryRun {
+			if t.Logger != nil {
+				t.Info("dry-run, skipping copy", slog.String("src", ref.String()), slog.String("dst", newRef.String()))
+			}
+			return nil
+		}
 		err = crane.Copy(ref.String(), newRef.String(), crane.WithNoClobber(t.NoClobber))
 		if err != nil {
 			return err
@@ -196,6 +222,8 @@ func (t *RepoRemapper) ReMap(h *History) error {
 // TagRemapper looks up the remote image and translates it to the current digest form
 type TagRemapper struct {
 	CheckOnly bool // CheckOnly will ensure the remote image exists, but will leave it unchanged
+
+	Logger
 }
 
 // ReMap looks up the remote image and translates it to the current digest form

@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"log/slog"
 	"net/http/httptest"
 	"net/url"
 	"strconv"
@@ -32,12 +33,33 @@ import (
 // - syncer non-ignored images are processed
 // - syncer jsonPath processing finds images.
 //
-// - tag remapper checkOnly doesn't change images
-// - tag remapper fails if remote image does not exist
-// - tag remapper maps to correct digest
-//
-// - repo remapper copies images
 // - repo remapper fails if image cannot be copied (src failure, or dest failure)
+
+type logRecord struct {
+	msg   string
+	level slog.Level
+	args  []any
+}
+type testLogger struct {
+	t       *testing.T
+	entries []logRecord
+}
+
+func (tl *testLogger) Debug(msg string, args ...any) {
+	tl.entries = append(tl.entries, logRecord{
+		msg:   msg,
+		level: slog.LevelDebug,
+		args:  args,
+	})
+}
+
+func (tl *testLogger) Info(msg string, args ...any) {
+	tl.entries = append(tl.entries, logRecord{
+		msg:   msg,
+		level: slog.LevelInfo,
+		args:  args,
+	})
+}
 
 type testUpdater struct {
 	err        error
@@ -364,7 +386,10 @@ func TestTagRemapper(t *testing.T) {
 	t.Logf("u1: %s", u1)
 	t.Logf("taggedSrc: %s", taggedSrc)
 
-	tr := &TagRemapper{}
+	tl := &testLogger{t: t}
+	tr := &TagRemapper{
+		Logger: tl,
+	}
 
 	h := NewHistory(latestTag)
 	err = tr.ReMap(h)
@@ -438,10 +463,12 @@ func TestRepoRemapper(t *testing.T) {
 
 	tmplStr := template.Must(template.New("test").Parse(`{{ .RemotePath }}/{{ .Repository }}:{{ .DigestHex }}`))
 
+	tl := &testLogger{t: t}
 	rr := &RepoRemapper{
 		RemotePath: u2.Host + "/imported",
 		RemoteTmpl: tmplStr,
 		NoClobber:  false,
+		Logger:     tl,
 	}
 
 	h := NewHistory(digTag)
