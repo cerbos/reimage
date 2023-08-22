@@ -55,9 +55,40 @@ var (
 	_ = mustCompile(DefaultRulesConfig)
 )
 
+type HistoryItem struct {
+	Ref name.Reference
+	Log string
+}
+
+type History []HistoryItem
+
+func NewHistory(ref name.Reference) *History {
+	return &History{HistoryItem{Ref: ref, Log: "original"}}
+}
+
+func (h *History) Original() HistoryItem {
+	return (*h)[0]
+}
+
+func (h *History) OriginalRef() name.Reference {
+	return h.Original().Ref
+}
+
+func (h *History) Latest() HistoryItem {
+	return (*h)[len(*h)-1]
+}
+
+func (h *History) LatestRef() name.Reference {
+	return h.Latest().Ref
+}
+
+func (h *History) Add(ref name.Reference, log string) {
+	*h = append(*h, HistoryItem{Ref: ref, Log: log})
+}
+
 // A Remapper transforms OCI images references, and may perform side effects
 type Remapper interface {
-	ReMap(ref name.Reference) (name.Reference, error)
+	ReMap(ref *History) error
 }
 
 // RepoTemplateInput is the input provied to the RemoteTmpl of the RepoRemapper
@@ -105,8 +136,9 @@ func needsUpdate(newRef name.Reference, old name.Digest) (bool, error) {
 
 // ReMap copies an image from the original registry to
 // a given new destination registry
-func (t *RepoRemapper) ReMap(ref name.Reference) (name.Reference, error) {
+func (t *RepoRemapper) ReMap(h *History) error {
 	var err error
+	ref := h.LatestRef()
 	refCtx := ref.Context()
 
 	var digest name.Digest
@@ -136,27 +168,29 @@ func (t *RepoRemapper) ReMap(ref name.Reference) (name.Reference, error) {
 
 	err = t.RemoteTmpl.Execute(newName, input)
 	if err != nil {
-		return nil, err
+		return err
 	}
 
 	newRef, err := name.ParseReference(newName.String())
 	if err != nil {
-		return nil, err
+		return err
 	}
+
+	h.Add(newRef, "remapped to new repo")
 
 	update, err := needsUpdate(newRef, digest)
 	if err != nil {
-		return nil, err
+		return err
 	}
 
 	if update {
 		err = crane.Copy(ref.String(), newRef.String(), crane.WithNoClobber(t.NoClobber))
 		if err != nil {
-			return nil, err
+			return err
 		}
 	}
 
-	return newRef, nil
+	return nil
 }
 
 // TagRemapper looks up the remote image and translates it to the current digest form
@@ -165,19 +199,22 @@ type TagRemapper struct {
 }
 
 // ReMap looks up the remote image and translates it to the current digest form
-func (t *TagRemapper) ReMap(ref name.Reference) (name.Reference, error) {
+func (t *TagRemapper) ReMap(h *History) error {
+	ref := h.LatestRef()
 	desc, err := remote.Get(ref)
 	if err != nil {
-		return nil, err
+		return err
 	}
 
 	if t.CheckOnly {
-		return ref, nil
+		return nil
 	}
 
-	tag := ref.Context().Registry.Repo(ref.Context().RepositoryStr()).Digest(desc.Digest.String())
+	digestStr := desc.Digest.String()
+	tag := ref.Context().Registry.Repo(ref.Context().RepositoryStr()).Digest(digestStr)
+	h.Add(tag, fmt.Sprintf("tag %s remapped to digest %s", ref.String(), digestStr))
 
-	return tag, nil
+	return nil
 }
 
 // MultiRemapper applies each remapper, passing results from one to the next.
@@ -185,17 +222,16 @@ type MultiRemapper []Remapper
 
 // ReMap applies each remapper, passing results from one to the next.
 // An error is returned as soon as any remapper fails
-func (t MultiRemapper) ReMap(ref name.Reference) (name.Reference, error) {
+func (t MultiRemapper) ReMap(h *History) error {
 	var err error
-	newRef := ref
 	for _, rm := range t {
-		newRef, err = rm.ReMap(newRef)
+		err = rm.ReMap(h)
 		if err != nil {
-			return nil, err
+			return err
 		}
 	}
 
-	return newRef, nil
+	return nil
 }
 
 // ImagesFinder specifies any mechanism for finding images within any
@@ -224,12 +260,14 @@ func (s *RemapUpdater) remapImageString(img string) (string, error) {
 		return "", fmt.Errorf("could not parse image ref %s, %w", img, err)
 	}
 
-	ref, err = s.Remapper.ReMap(ref)
+	h := NewHistory(ref)
+
+	err = s.Remapper.ReMap(h)
 	if err != nil {
 		return "", fmt.Errorf("could not remap image %s, %w", img, err)
 	}
 
-	return ref.String(), nil
+	return h.LatestRef().String(), nil
 }
 
 func (s *RemapUpdater) processContainers(cnts []corev1.Container) error {

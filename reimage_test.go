@@ -366,10 +366,12 @@ func TestTagRemapper(t *testing.T) {
 
 	tr := &TagRemapper{}
 
-	newTag, err := tr.ReMap(latestTag)
+	h := NewHistory(latestTag)
+	err = tr.ReMap(h)
 	if err != nil {
 		t.Fatalf("remap failed, %v", err)
 	}
+	newTag := h.LatestRef()
 	t.Logf("newTag: %v", newTag)
 
 	newDig, ok := newTag.(name.Digest)
@@ -382,10 +384,12 @@ func TestTagRemapper(t *testing.T) {
 	}
 
 	tr.CheckOnly = true
-	newTag, err = tr.ReMap(latestTag)
+	h = NewHistory(latestTag)
+	err = tr.ReMap(h)
 	if err != nil {
 		t.Fatalf("checkOnly remap failed, %v", err)
 	}
+	newTag = h.LatestRef()
 
 	if newTag.String() != latestTag.String() {
 		t.Fatalf("checkOnly altered tag:\n  exp: %s\n  got: %s", latestTag, newTag)
@@ -440,10 +444,12 @@ func TestRepoRemapper(t *testing.T) {
 		NoClobber:  false,
 	}
 
-	newTag, err := rr.ReMap(digTag)
+	h := NewHistory(digTag)
+	err = rr.ReMap(h)
 	if err != nil {
 		t.Fatalf("remap failed, %v", err)
 	}
+	newTag := h.LatestRef()
 	t.Logf("newTag: %v", newTag)
 
 	newImgDesc, err := remote.Get(newTag)
