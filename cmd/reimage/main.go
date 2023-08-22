@@ -104,7 +104,6 @@ func main() {
 		Ignore:                   matchRe,
 		Remapper:                 rm,
 		UnstructuredImagesFinder: jifs,
-		Logger:                   log,
 	}
 
 	err = reimage.Process(os.Stdout, os.Stdin, s)
