@@ -1,6 +1,8 @@
 module github.com/cerbos/reimage
 
-go 1.20
+go 1.21
+
+toolchain go1.21.0
 
 require (
 	github.com/AsaiYusuke/jsonpath v1.6.0
