@@ -422,6 +422,46 @@ func TestTagRemapper(t *testing.T) {
 }
 
 func TestRepoRemapper(t *testing.T) {
+	base := "myreg.com/firstrepo/test/img1"
+	tagStr := fmt.Sprintf("%s:latest", base)
+	hashStr := "abcdabcdabceabcdabcdabcdabcdabcdabcdabcdabcaacbcbfedabcaefacbaea"
+
+	digStr := fmt.Sprintf("%s@sha256:%s", base, hashStr)
+
+	tagRef, err := name.ParseReference(tagStr)
+	if err != nil {
+		t.Fatalf("test borked, %v", err)
+	}
+	digRef, err := name.ParseReference(digStr)
+	if err != nil {
+		t.Fatalf("test borked digest, %v", err)
+	}
+	h := NewHistory(tagRef)
+	h.Add(digRef, "adding digest")
+
+	tmplStr := template.Must(template.New("test").Parse(`{{ .RemotePath }}/{{ .Registry}}/{{ .Repository }}:{{ .DigestHex }}`))
+
+	remoteStr := "secondrepo/imported"
+	tl := &testLogger{t: t}
+	rr := &RepoRemapper{
+		RemotePath: remoteStr,
+		RemoteTmpl: tmplStr,
+		Logger:     tl,
+	}
+
+	exp := fmt.Sprintf("%s/%s:%s", remoteStr, base, hashStr)
+
+	err = rr.ReMap(h)
+	if err != nil {
+		t.Fatalf("remap failed, %v", err)
+	}
+	newTag := h.LatestRef()
+	if newTag.String() != exp {
+		t.Fatalf("incorred latest tag:\n  got: %s\n  exp: %s\n", newTag.String(), exp)
+	}
+}
+
+func TestEnsureRemapper(t *testing.T) {
 	rl := newTestRegistryLogger(t)
 	s1 := httptest.NewServer(registry.New(rl))
 	defer s1.Close()
@@ -456,32 +496,26 @@ func TestRepoRemapper(t *testing.T) {
 	}
 
 	imgTag, _ := name.ParseReference(src)
-	imgDesc, _ := remote.Get(imgTag)
-	digTag := imgTag.Context().Registry.Repo(imgTag.Context().RepositoryStr()).Digest(imgDesc.Digest.String())
 
-	t.Logf("img digtest tag: %s", digTag)
+	dst := fmt.Sprintf("%s/imported/test/img1", u2.Host)
 
-	tmplStr := template.Must(template.New("test").Parse(`{{ .RemotePath }}/{{ .Repository }}:{{ .DigestHex }}`))
+	newTag, _ := name.ParseReference(dst)
+
+	h := NewHistory(imgTag)
+	h.Add(newTag, "renamed")
 
 	tl := &testLogger{t: t}
-	rr := &RepoRemapper{
-		RemotePath: u2.Host + "/imported",
-		RemoteTmpl: tmplStr,
-		NoClobber:  false,
-		Logger:     tl,
+	er := &EnsureRemapper{
+		Logger: tl,
 	}
-
-	h := NewHistory(digTag)
-	err = rr.ReMap(h)
+	err = er.ReMap(h)
 	if err != nil {
-		t.Fatalf("remap failed, %v", err)
+		t.Fatalf("ensure remapper failed, %v", err)
 	}
-	newTag := h.LatestRef()
-	t.Logf("newTag: %v", newTag)
 
 	newImgDesc, err := remote.Get(newTag)
 	if err != nil {
-		t.Fatalf("could not get copied image, %v", err)
+		t.Fatalf("could not look up remote image, %v", err)
 	}
 
 	newDigest := newImgDesc.Digest.String()

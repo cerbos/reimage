@@ -7,7 +7,6 @@ package reimage
 import (
 	"bufio"
 	"bytes"
-	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -45,6 +44,9 @@ func mustCompile(cfgs []JSONImageFinderConfig) ImagesFinder {
 var (
 	// DefaultTemplateStr is a sensible default for importing images
 	DefaultTemplateStr = `{{ .RemotePath }}/{{ .Registry }}/{{ .Repository }}:{{ .DigestHex }}`
+
+	// DefaultRulesConfig is a set of additional, non-core rules for known existing image
+	// locations
 	DefaultRulesConfig = []JSONImageFinderConfig{
 		{
 			Kind:       "^Prometheus$",
@@ -65,35 +67,66 @@ type Logger interface {
 // DefaultLogger is a quick shortcut to the slog default logger
 var DefaultLogger = Logger(slog.Default())
 
+// A HistoryItem stores any update to a reference by a mapping stage
 type HistoryItem struct {
 	Ref name.Reference
 	Log string
 }
 
+// History is the full set of updates performed so far
 type History []HistoryItem
 
+// NewHistory starts a history for a given reference
 func NewHistory(ref name.Reference) *History {
 	return &History{HistoryItem{Ref: ref, Log: "original"}}
 }
 
+// Original returns the start of the mapping history
 func (h *History) Original() HistoryItem {
 	return (*h)[0]
 }
 
+// OriginalRef returns the original reference that we started
+// processing
 func (h *History) OriginalRef() name.Reference {
 	return h.Original().Ref
 }
 
+// Latest returns the most recent history update
 func (h *History) Latest() HistoryItem {
 	return (*h)[len(*h)-1]
 }
 
+// LatestRef returns the most up to date reference
 func (h *History) LatestRef() name.Reference {
 	return h.Latest().Ref
 }
 
+// Add updates the history with a new reference mutation
 func (h *History) Add(ref name.Reference, log string) {
 	*h = append(*h, HistoryItem{Ref: ref, Log: log})
+}
+
+// OriginalDigest looks through the history to find any previously looked
+// up Digest of the original image. If none is found it is looked
+// up and added to the history
+func (h *History) OriginalDigest() (name.Digest, error) {
+	for _, hi := range *h {
+		if d, ok := hi.Ref.(name.Digest); ok {
+			return d, nil
+		}
+	}
+
+	ref := h.OriginalRef()
+	digestStr, err := crane.Digest(ref.String())
+	if err != nil {
+		return name.Digest{}, err
+	}
+	digest := ref.Context().Registry.Repo(ref.Context().RepositoryStr()).Digest(digestStr)
+
+	h.Add(digest, "resolved original image digest")
+
+	return digest, nil
 }
 
 // A Remapper transforms OCI images references, and may perform side effects
@@ -118,61 +151,34 @@ type RepoTemplateInput struct {
 type RepoRemapper struct {
 	RemotePath string             // used for the .RemotePath value in the template
 	RemoteTmpl *template.Template // template to build the final image string
-	NoClobber  bool               // If true, we'll refuse to overwrite remote images
-	DryRun     bool               // If true, don't perform the any actual copies
 
+	history map[string]string // track existing remaps so that we one ever do 1 to 1
 	Logger
-}
-
-func needsUpdate(ctx context.Context, newRef name.Reference, old name.Digest, log Logger) (bool, error) {
-	digest, err := crane.Digest(newRef.String())
-
-	var terr *transport.Error
-	if errors.As(err, &terr) {
-		if terr.StatusCode == http.StatusNotFound {
-			if log != nil {
-				log.Info("image tag not pushed yet", slog.String("ref", newRef.String()))
-			}
-			return true, nil
-		}
-		return false, terr
-	} else if err != nil {
-		return false, err
-	}
-
-	if digest == old.DigestStr() {
-		if log != nil {
-			log.Debug("image tag already exists at current local digest, %s", slog.String("ref", newRef.String()))
-		}
-		return false, nil
-	}
-
-	if log != nil {
-		log.Info("current remote image tag does not match local digest, %s", slog.String("ref", newRef.String()))
-	}
-	return true, nil
 }
 
 // ReMap copies an image from the original registry to
 // a given new destination registry
 func (t *RepoRemapper) ReMap(h *History) error {
-	ctx := context.TODO()
 	var err error
 	ref := h.LatestRef()
 	refCtx := ref.Context()
 
-	var digest name.Digest
-	digestStr, digestAlgo, digestHex := "", "", ""
+	digest, err := h.OriginalDigest()
+	if err != nil {
+		return fmt.Errorf("repo-remapper failed to look up original digest, %w", err)
+	}
+
 	tagStr := ""
 	switch r := ref.(type) {
 	case name.Digest:
 		digest = r
-		digestStr = r.DigestStr()
-		digestAlgo, digestHex, _ = strings.Cut(digestStr, ":")
 	case name.Tag:
 		tagStr = r.TagStr()
 	default:
 	}
+
+	digestStr := digest.DigestStr()
+	digestAlgo, digestHex, _ := strings.Cut(digestStr, ":")
 
 	input := RepoTemplateInput{
 		RemotePath: t.RemotePath,
@@ -196,25 +202,17 @@ func (t *RepoRemapper) ReMap(h *History) error {
 		return err
 	}
 
+	if t.history == nil {
+		t.history = map[string]string{}
+	}
+
+	origStr := h.OriginalRef().String()
+	if existing, ok := t.history[origStr]; ok && existing != newRef.String() {
+		return fmt.Errorf("template remapping must be one to one, cannot map %s to %s aswell as %s", origStr, existing, newRef)
+	}
+
+	t.history[origStr] = newRef.String()
 	h.Add(newRef, "remapped to new repo")
-
-	update, err := needsUpdate(ctx, newRef, digest, t)
-	if err != nil {
-		return err
-	}
-
-	if update {
-		if t.DryRun {
-			if t.Logger != nil {
-				t.Info("dry-run, skipping copy", slog.String("src", ref.String()), slog.String("dst", newRef.String()))
-			}
-			return nil
-		}
-		err = crane.Copy(ref.String(), newRef.String(), crane.WithNoClobber(t.NoClobber))
-		if err != nil {
-			return err
-		}
-	}
 
 	return nil
 }
@@ -245,6 +243,74 @@ func (t *TagRemapper) ReMap(h *History) error {
 	return nil
 }
 
+func needsUpdate(newRef name.Reference, old name.Digest, log Logger) (bool, error) {
+	digest, err := crane.Digest(newRef.String())
+
+	var terr *transport.Error
+	if errors.As(err, &terr) {
+		if terr.StatusCode == http.StatusNotFound {
+			if log != nil {
+				log.Info("image tag not pushed yet", slog.String("ref", newRef.String()))
+			}
+			return true, nil
+		}
+		return false, terr
+	} else if err != nil {
+		return false, err
+	}
+
+	if digest == old.DigestStr() {
+		if log != nil {
+			log.Debug("image tag already exists at current local digest, %s", slog.String("ref", newRef.String()))
+		}
+		return false, nil
+	}
+
+	if log != nil {
+		log.Info("current remote image tag does not match local digest, %s", slog.String("ref", newRef.String()))
+	}
+	return true, nil
+}
+
+// EnsureRemapper is a mapper that will copy the original image reference
+// to the latest, possibly remote, reference
+type EnsureRemapper struct {
+	NoClobber bool // If true, we'll refuse to overwrite remote images
+	DryRun    bool // If true, don't perform the any actual copies
+
+	Logger
+}
+
+// ReMap copies the original reference to the latest, potentially remote reference
+func (t *EnsureRemapper) ReMap(h *History) error {
+	srcRef := h.OriginalRef()
+	newRef := h.LatestRef()
+	digest, err := h.OriginalDigest()
+	if err != nil {
+		return fmt.Errorf("ensure remapper failed to look up the digest, %w", err)
+	}
+
+	update, err := needsUpdate(newRef, digest, t)
+	if err != nil {
+		return err
+	}
+
+	if update {
+		if t.DryRun {
+			if t.Logger != nil {
+				t.Info("dry-run, skipping copy", slog.String("src", srcRef.String()), slog.String("dst", newRef.String()))
+			}
+			return nil
+		}
+		err = crane.Copy(srcRef.String(), newRef.String(), crane.WithNoClobber(t.NoClobber))
+		if err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
 // MultiRemapper applies each remapper, passing results from one to the next.
 type MultiRemapper []Remapper
 
@@ -260,6 +326,35 @@ func (t MultiRemapper) ReMap(h *History) error {
 	}
 
 	return nil
+}
+
+// RecorderRemapper records all remappings up as they are seen
+type RecorderRemapper struct {
+	histories []*History
+}
+
+// Recorder records all remappings so far, should usuually be used as the final
+// remapper
+func (r *RecorderRemapper) ReMap(h *History) error {
+	r.histories = append(r.histories, h)
+	return nil
+}
+
+// Summary returns the set of image original to final performed by
+// all the remappers
+func (r *RecorderRemapper) Summary() (map[string]string, error) {
+	res := map[string]string{}
+
+	for _, h := range r.histories {
+		org := h.OriginalRef()
+		last := h.LatestRef().String()
+		if foundStr, ok := res[org.String()]; ok && foundStr != last {
+			return nil, fmt.Errorf("remapping must be one to one, cannot map %s to %s aswell as %s", org, foundStr, last)
+		}
+		res[org.String()] = last
+	}
+
+	return res, nil
 }
 
 // ImagesFinder specifies any mechanism for finding images within any

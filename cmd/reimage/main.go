@@ -4,6 +4,7 @@
 package main
 
 import (
+	"encoding/json"
 	"flag"
 	"log/slog"
 	"os"
@@ -11,6 +12,7 @@ import (
 	"text/template"
 
 	"github.com/cerbos/reimage"
+	"github.com/google/go-containerregistry/pkg/crane"
 
 	"k8s.io/apimachinery/pkg/util/yaml"
 )
@@ -26,6 +28,8 @@ func main() {
 	rulesConfigFile := flag.String("rules-config", "", "yaml definition of kind/image-path mappings")
 	dryRun := flag.Bool("dryrun", false, "only log actions")
 	debug := flag.Bool("debug", false, "enable debug logging")
+	writeMappings := flag.String("write-json-mappings-file", "", "write final image mappings to a json file")
+	writeMappingsImg := flag.String("write-json-mappings-img", "", "write final image mapping to a registry image")
 	flag.Parse()
 
 	slvl := &slog.LevelVar{}
@@ -93,12 +97,19 @@ func main() {
 		rm = append(rm, &reimage.RepoRemapper{
 			RemotePath: *remotePath,
 			RemoteTmpl: remoteTmpl,
-			NoClobber:  !(*clobber),
-			DryRun:     (*dryRun),
 			Logger:     log,
 		})
 		tagRemapper.CheckOnly = false
 	}
+
+	recorder := &reimage.RecorderRemapper{}
+	rm = append(rm, recorder)
+
+	ensurer := &reimage.EnsureRemapper{
+		NoClobber: !(*clobber),
+		DryRun:    (*dryRun),
+	}
+	rm = append(rm, ensurer)
 
 	s := &reimage.RemapUpdater{
 		Ignore:                   matchRe,
@@ -110,5 +121,35 @@ func main() {
 	if err != nil {
 		log.Error("could not update input", slog.String("err", err.Error()))
 		os.Exit(1)
+	}
+
+	mappings, err := recorder.Summary()
+	if err != nil {
+		log.Error("mappings were invalid", slog.String("err", err.Error()))
+		os.Exit(1)
+	}
+	bs, _ := json.Marshal(mappings)
+
+	if *writeMappings != "" {
+		err = os.WriteFile(*writeMappings, bs, 0644)
+		if err != nil {
+			log.Error("could not write mappings file", slog.String("err", err.Error()))
+			os.Exit(1)
+		}
+	}
+
+	if *writeMappingsImg != "" {
+		cnt := map[string][]byte{
+			"reimage-mapping.json": bs,
+		}
+		img, err := crane.Image(cnt)
+		if err != nil {
+			log.Error("could not create remappings image", slog.String("err", err.Error()))
+		}
+
+		err = crane.Push(img, *writeMappingsImg)
+		if err != nil {
+			log.Error("could not push remappings image", slog.String("err", err.Error()))
+		}
 	}
 }
