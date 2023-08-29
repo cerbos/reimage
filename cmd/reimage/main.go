@@ -17,24 +17,45 @@ import (
 	"k8s.io/apimachinery/pkg/util/yaml"
 )
 
+type settings struct {
+	Version              bool
+	MatcherString        string
+	matcher              *regexp.Regexp
+	RemotePath           string
+	RemoteTemplateString string
+	remoteTemplate       *template.Template
+	Clobber              bool
+	RulesConfigFile      string
+	DryRun               bool
+	WriteMappings        string
+	WriteMappingsImg     string
+	StaticMappings       string
+	StaticMappingsImg    string
+	Debug                bool
+}
+
 func main() {
 	var err error
 
-	version := flag.Bool("V", false, "print version/build info")
-	matcher := flag.String("ignore", "^$", "ignore images matching this expression")
-	remotePath := flag.String("remote-path", "", "template for remapping imported images")
-	clobber := flag.Bool("clobber", false, "allow overwriting remote images")
-	remoteTemplateStr := flag.String("remote", reimage.DefaultTemplateStr, "template for remapping imported images")
-	rulesConfigFile := flag.String("rules-config", "", "yaml definition of kind/image-path mappings")
-	dryRun := flag.Bool("dryrun", false, "only log actions")
-	debug := flag.Bool("debug", false, "enable debug logging")
-	writeMappings := flag.String("write-json-mappings-file", "", "write final image mappings to a json file")
-	writeMappingsImg := flag.String("write-json-mappings-img", "", "write final image mapping to a registry image")
+	settings := settings{}
+
+	flag.BoolVar(&settings.Version, "V", false, "print version/build info")
+	flag.StringVar(&settings.MatcherString, "ignore", "^$", "ignore images matching this expression")
+	flag.StringVar(&settings.RemotePath, "remote-path", "", "template for remapping imported images")
+	flag.BoolVar(&settings.Clobber, "clobber", false, "allow overwriting remote images")
+	flag.StringVar(&settings.RemoteTemplateString, "remote", reimage.DefaultTemplateStr, "template for remapping imported images")
+	flag.StringVar(&settings.RulesConfigFile, "rules-config", "", "yaml definition of kind/image-path mappings")
+	flag.BoolVar(&settings.DryRun, "dryrun", false, "only log actions")
+	flag.BoolVar(&settings.Debug, "debug", false, "enable debug logging")
+	flag.StringVar(&settings.WriteMappings, "write-json-mappings-file", "", "write final image mappings to a json file")
+	flag.StringVar(&settings.WriteMappingsImg, "write-json-mappings-img", "", "write final image mapping to a registry image")
+	flag.StringVar(&settings.StaticMappings, "static-json-mappings-file", "", "take all mappings from a mappings file")
+	flag.StringVar(&settings.StaticMappingsImg, "static-json-mappings-img", "", "take all mapping from a mappings registry image")
 	flag.Parse()
 
 	slvl := &slog.LevelVar{}
 	slvl.Set(slog.LevelInfo)
-	if *debug {
+	if settings.Debug {
 		slvl.Set(slog.LevelDebug)
 	}
 
@@ -46,24 +67,24 @@ func main() {
 			}),
 	)
 
-	if *version {
+	if settings.Version {
 		printVersion()
 		return
 	}
 
-	matchRe := regexp.MustCompile(*matcher)
+	settings.matcher = regexp.MustCompile(settings.MatcherString)
 
-	var remoteTmpl *template.Template
-	if *remotePath != "" && *remoteTemplateStr != "" {
-		remoteTmpl = template.New("remote")
-		remoteTmpl = template.Must(remoteTmpl.Parse(*remoteTemplateStr))
+	if settings.RemotePath != "" && settings.RemoteTemplateString != "" {
+		settings.remoteTemplate = template.Must(
+			template.New("remote").Parse(settings.RemoteTemplateString),
+		)
 	} else {
 		log.Info("copying disabled, (remote path and remote template must be set)")
 	}
 
 	ruleConfig := []byte{}
-	if *rulesConfigFile != "" {
-		ruleConfig, err = os.ReadFile(*rulesConfigFile)
+	if settings.RulesConfigFile != "" {
+		ruleConfig, err = os.ReadFile(settings.RulesConfigFile)
 		if err != nil {
 			log.Error("failed reading json matcher definitions", slog.String("err", err.Error()))
 			os.Exit(1)
@@ -84,6 +105,12 @@ func main() {
 		os.Exit(1)
 	}
 
+	if settings.StaticMappings != "" || settings.StaticMappingsImg != "" {
+		if settings.StaticMappings != "" && settings.StaticMappingsImg != "" {
+			log.Error("only one static mappings configuration is allowed")
+		}
+	}
+
 	tagRemapper := &reimage.TagRemapper{
 		CheckOnly: true,
 		Logger:    log,
@@ -93,10 +120,10 @@ func main() {
 		tagRemapper,
 	}
 
-	if remoteTmpl != nil {
+	if settings.remoteTemplate != nil {
 		rm = append(rm, &reimage.RepoRemapper{
-			RemotePath: *remotePath,
-			RemoteTmpl: remoteTmpl,
+			RemotePath: settings.RemotePath,
+			RemoteTmpl: settings.remoteTemplate,
 			Logger:     log,
 		})
 		tagRemapper.CheckOnly = false
@@ -106,13 +133,15 @@ func main() {
 	rm = append(rm, recorder)
 
 	ensurer := &reimage.EnsureRemapper{
-		NoClobber: !(*clobber),
-		DryRun:    (*dryRun),
+		NoClobber: !(settings.Clobber),
+		DryRun:    (settings.DryRun),
+
+		Logger: log,
 	}
 	rm = append(rm, ensurer)
 
 	s := &reimage.RemapUpdater{
-		Ignore:                   matchRe,
+		Ignore:                   settings.matcher,
 		Remapper:                 rm,
 		UnstructuredImagesFinder: jifs,
 	}
@@ -130,15 +159,15 @@ func main() {
 	}
 	bs, _ := json.Marshal(mappings)
 
-	if *writeMappings != "" {
-		err = os.WriteFile(*writeMappings, bs, 0644)
+	if settings.WriteMappings != "" {
+		err = os.WriteFile(settings.WriteMappings, bs, 0644)
 		if err != nil {
 			log.Error("could not write mappings file", slog.String("err", err.Error()))
 			os.Exit(1)
 		}
 	}
 
-	if *writeMappingsImg != "" {
+	if settings.WriteMappingsImg != "" {
 		cnt := map[string][]byte{
 			"reimage-mapping.json": bs,
 		}
@@ -147,7 +176,7 @@ func main() {
 			log.Error("could not create remappings image", slog.String("err", err.Error()))
 		}
 
-		err = crane.Push(img, *writeMappingsImg)
+		err = crane.Push(img, settings.WriteMappingsImg)
 		if err != nil {
 			log.Error("could not push remappings image", slog.String("err", err.Error()))
 		}
