@@ -7,20 +7,23 @@ package reimage
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 	"regexp"
+	"sort"
 	"strings"
 	"text/template"
 
+	grafeas "cloud.google.com/go/grafeas/apiv1"
 	"github.com/AsaiYusuke/jsonpath"
 	"github.com/google/go-containerregistry/pkg/crane"
 	"github.com/google/go-containerregistry/pkg/name"
-	"github.com/google/go-containerregistry/pkg/v1/remote"
 	"github.com/google/go-containerregistry/pkg/v1/remote/transport"
+	"github.com/googleapis/gax-go/v2"
 
 	appsv1 "k8s.io/api/apps/v1"
 	batchv1 "k8s.io/api/batch/v1"
@@ -31,6 +34,9 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/yaml"
 	"k8s.io/cli-runtime/pkg/printers"
+
+	"google.golang.org/api/iterator"
+	grafeaspb "google.golang.org/genproto/googleapis/grafeas/v1"
 )
 
 func mustCompile(cfgs []JSONImageFinderConfig) ImagesFinder {
@@ -120,7 +126,7 @@ func (h *History) OriginalDigest() (name.Digest, error) {
 	ref := h.OriginalRef()
 	digestStr, err := crane.Digest(ref.String())
 	if err != nil {
-		return name.Digest{}, err
+		return name.Digest{}, fmt.Errorf("failed reading digest for %s, %w", ref.String(), err)
 	}
 	digest := ref.Context().Registry.Repo(ref.Context().RepositoryStr()).Digest(digestStr)
 
@@ -145,10 +151,11 @@ type RepoTemplateInput struct {
 	Repository string // The image repository
 }
 
-// RepoRemapper is a Remapper implementation that copies images to
+// RenameRemapper is a Remapper implementation that can rename an image to
 // a remote registry/repository path. The new path is built using RemoteTmpl,
-// and the copy is performed using crane.Copy.
-type RepoRemapper struct {
+// and the copy is performed using crane.Copy. reimage will then optionally
+// copy the image to the new locatio
+type RenameRemapper struct {
 	RemotePath string             // used for the .RemotePath value in the template
 	RemoteTmpl *template.Template // template to build the final image string
 
@@ -158,7 +165,7 @@ type RepoRemapper struct {
 
 // ReMap copies an image from the original registry to
 // a given new destination registry
-func (t *RepoRemapper) ReMap(h *History) error {
+func (t *RenameRemapper) ReMap(h *History) error {
 	var err error
 	ref := h.LatestRef()
 	refCtx := ref.Context()
@@ -217,32 +224,6 @@ func (t *RepoRemapper) ReMap(h *History) error {
 	return nil
 }
 
-// TagRemapper looks up the remote image and translates it to the current digest form
-type TagRemapper struct {
-	CheckOnly bool // CheckOnly will ensure the remote image exists, but will leave it unchanged
-
-	Logger
-}
-
-// ReMap looks up the remote image and translates it to the current digest form
-func (t *TagRemapper) ReMap(h *History) error {
-	ref := h.LatestRef()
-	desc, err := remote.Get(ref)
-	if err != nil {
-		return err
-	}
-
-	if t.CheckOnly {
-		return nil
-	}
-
-	digestStr := desc.Digest.String()
-	tag := ref.Context().Registry.Repo(ref.Context().RepositoryStr()).Digest(digestStr)
-	h.Add(tag, fmt.Sprintf("tag %s remapped to digest %s", ref.String(), digestStr))
-
-	return nil
-}
-
 func needsUpdate(newRef name.Reference, old name.Digest, log Logger) (bool, error) {
 	digest, err := crane.Digest(newRef.String())
 
@@ -270,6 +251,56 @@ func needsUpdate(newRef name.Reference, old name.Digest, log Logger) (bool, erro
 		log.Info("current remote image tag does not match local digest, %s", slog.String("ref", newRef.String()))
 	}
 	return true, nil
+}
+
+type QualifiedImage struct {
+	Tag    string `json:"tag"`
+	Digest string `json:"digest"`
+}
+
+type StaticRemapper struct {
+	Mappings     map[string]QualifiedImage
+	AllowMissing bool
+}
+
+func NewStaticRemapper(mps map[string]QualifiedImage) (*StaticRemapper, error) {
+	for k, v := range mps {
+		_, err := name.ParseReference(k)
+		if err != nil {
+			return nil, fmt.Errorf("could not parse mapping key %s, %w", k, err)
+		}
+
+		_, err = name.ParseReference(v.Tag)
+		if err != nil {
+			return nil, fmt.Errorf("could not parse mapping value %s, %w", v.Tag, err)
+		}
+
+		dig, err := crane.Digest(v.Tag)
+		if err != nil {
+			return nil, fmt.Errorf("could not check digest for %s, %w", v.Tag, err)
+		}
+		if dig != v.Digest {
+			return nil, fmt.Errorf("mapping for %s has changed, was %s, is now %s", v.Tag, v.Digest, dig)
+		}
+	}
+
+	return &StaticRemapper{Mappings: mps}, nil
+}
+
+func (s *StaticRemapper) ReMap(h *History) error {
+	refStr := h.LatestRef().String()
+	staticDetails, ok := s.Mappings[refStr]
+	if !ok {
+		if s.AllowMissing {
+			return nil
+		}
+		return fmt.Errorf("no known static reference for %s", refStr)
+	}
+	newRef, _ := name.ParseReference(staticDetails.Tag)
+	h.Add(newRef, "statically re-mapped")
+	digRef := newRef.Context().Registry.Repo(newRef.Context().RepositoryStr()).Digest(staticDetails.Digest)
+	h.Add(digRef, "statically re-mapped digest")
+	return nil
 }
 
 // EnsureRemapper is a mapper that will copy the original image reference
@@ -340,18 +371,26 @@ func (r *RecorderRemapper) ReMap(h *History) error {
 	return nil
 }
 
-// Summary returns the set of image original to final performed by
+// Mappings returns the set of image original to final performed by
 // all the remappers
-func (r *RecorderRemapper) Summary() (map[string]string, error) {
-	res := map[string]string{}
+func (r *RecorderRemapper) Mappings() (map[string]QualifiedImage, error) {
+	res := map[string]QualifiedImage{}
 
 	for _, h := range r.histories {
 		org := h.OriginalRef()
-		last := h.LatestRef().String()
-		if foundStr, ok := res[org.String()]; ok && foundStr != last {
+		last := h.LatestRef()
+		lastDig, err := h.OriginalDigest()
+		if err != nil {
+			return nil, fmt.Errorf("failed to record digest, %w", err)
+		}
+		lastImg := QualifiedImage{
+			Tag:    last.String(),
+			Digest: lastDig.DigestStr(),
+		}
+		if foundStr, ok := res[org.String()]; ok && foundStr != lastImg {
 			return nil, fmt.Errorf("remapping must be one to one, cannot map %s to %s aswell as %s", org, foundStr, last)
 		}
-		res[org.String()] = last
+		res[org.String()] = lastImg
 	}
 
 	return res, nil
@@ -675,4 +714,154 @@ func CompileJSONImageFinders(jmCfgs []JSONImageFinderConfig) (ImagesFinder, erro
 		jms = append(jms, jm)
 	}
 	return jms, nil
+}
+
+// GrafeasClient still isn't mockable, need to wrap it
+type GrafeasClient interface {
+	ListOccurrences(ctx context.Context, req *grafeaspb.ListOccurrencesRequest, opts ...gax.CallOption) *grafeas.OccurrenceIterator
+}
+
+// VulnChecker checks that images have been scanned, and checks that
+// they do not contain unexpected vulnerabilities
+type VulnChecker struct {
+	Grafeas      GrafeasClient
+	Parent       string
+	MaxCVSS      float32
+	CVEAllowList []string
+	Logger
+
+	cveWhiteList map[string]struct{}
+}
+
+var ErrDiscoveryNotFound = errors.New("discovery not found in response")
+
+func (vc *VulnChecker) getDiscovery(ctx context.Context, dig name.Digest) (*grafeaspb.DiscoveryOccurrence, error) {
+	req := &grafeaspb.ListOccurrencesRequest{
+		Parent: vc.Parent,
+		Filter: fmt.Sprintf(`((kind = "DISCOVERY") AND (resourceUrl = "https://%s"))`, dig),
+	}
+	occs := vc.Grafeas.ListOccurrences(ctx, req)
+	for {
+		occ, err := occs.Next()
+		if errors.Is(err, iterator.Done) {
+			break
+		}
+		if err != nil {
+			return nil, err
+		}
+		switch occ.GetKind() {
+		case grafeaspb.NoteKind_DISCOVERY:
+			return occ.GetDiscovery(), nil
+		}
+	}
+
+	return nil, ErrDiscoveryNotFound
+}
+
+var errVulnerabilitiesNotFound = errors.New("vulnerability assessment not found in response")
+
+func (vc *VulnChecker) getVulnerabilities(ctx context.Context, dig name.Digest) ([]*grafeaspb.VulnerabilityOccurrence, error) {
+	req := &grafeaspb.ListOccurrencesRequest{
+		Parent: vc.Parent,
+		Filter: fmt.Sprintf(`((kind = "VULNERABILITY") AND (resourceUrl = "https://%s"))`, dig),
+	}
+	occs := vc.Grafeas.ListOccurrences(ctx, req)
+	var res []*grafeaspb.VulnerabilityOccurrence
+	for {
+		occ, err := occs.Next()
+		if errors.Is(err, iterator.Done) {
+			break
+		}
+		if err != nil {
+			return nil, err
+		}
+		switch occ.GetKind() {
+		case grafeaspb.NoteKind_VULNERABILITY:
+			res = append(res, occ.GetVulnerability())
+		}
+	}
+
+	return res, nil
+}
+
+var (
+	ErrDiscoverNotFinished = errors.New("vulnerability checking not completed")
+)
+
+// ImageCheckError is returned by Check if unwanted vulnerabilities are found
+type ImageCheckError struct {
+	Image   string
+	MaxCVSS float32
+	CVEs    map[string]float32
+}
+
+func (ice *ImageCheckError) Error() string {
+	cvsStrs := []string{}
+	for cve, score := range ice.CVEs {
+		cvsStrs = append(cvsStrs, fmt.Sprintf("%s(%.2f)", cve, score))
+	}
+	sort.Strings(cvsStrs)
+
+	str := fmt.Sprintf(
+		"image %s has %d CVEs with score > %.2f: %s",
+		ice.Image,
+		len(ice.CVEs),
+		ice.MaxCVSS,
+		strings.Join(cvsStrs, ","),
+	)
+
+	return str
+}
+
+// Check checks an individual image.
+// TODO(tcm): should accept a list of images and check them concurrently
+// TODO(tcm): needs to retry if an image has not been scanned yet
+func (vc *VulnChecker) Check(ctx context.Context, dig name.Digest) error {
+	if vc.cveWhiteList == nil {
+
+		vc.cveWhiteList = map[string]struct{}{}
+		for _, str := range vc.CVEAllowList {
+			vc.cveWhiteList[str] = struct{}{}
+		}
+	}
+
+	disc, err := vc.getDiscovery(ctx, dig)
+	if err != nil {
+		return err
+	}
+	switch disc.AnalysisStatus {
+	case grafeaspb.DiscoveryOccurrence_FINISHED_UNSUPPORTED:
+		return nil
+	case grafeaspb.DiscoveryOccurrence_FINISHED_SUCCESS:
+	default:
+		return ErrDiscoverNotFinished
+	}
+
+	if vc.MaxCVSS == 0 {
+		return nil
+	}
+
+	voccs, err := vc.getVulnerabilities(ctx, dig)
+	if err != nil {
+		return err
+	}
+
+	badCVEs := map[string]float32{}
+	for _, vocc := range voccs {
+		if vocc.GetCvssScore() > vc.MaxCVSS {
+			if _, ok := vc.cveWhiteList[vocc.GetShortDescription()]; ok {
+				continue
+			}
+			badCVEs[vocc.GetShortDescription()] = vocc.GetCvssScore()
+		}
+	}
+	if len(badCVEs) != 0 {
+		return &ImageCheckError{
+			Image:   dig.Name(),
+			MaxCVSS: vc.MaxCVSS,
+			CVEs:    badCVEs,
+		}
+	}
+
+	return nil
 }

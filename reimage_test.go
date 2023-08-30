@@ -354,74 +354,7 @@ func newTestRegistryLogger(t *testing.T) registry.Option {
 	return registry.Logger(log.New(rtl, "", 0))
 }
 
-func TestTagRemapper(t *testing.T) {
-	s1 := httptest.NewServer(registry.New(newTestRegistryLogger(t)))
-	defer s1.Close()
-	u1, err := url.Parse(s1.URL)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	src := fmt.Sprintf("%s/test/img1", u1.Host)
-
-	// Expected values.
-	img, err := random.Image(1024, 5)
-	if err != nil {
-		t.Fatal(err)
-	}
-	// Load up the registry.
-	if err := crane.Push(img, src); err != nil {
-		t.Fatal(err)
-	}
-
-	imgHash, _ := img.Digest()
-
-	if err := crane.Tag(src, "latest"); err != nil {
-		t.Fatal(err)
-	}
-
-	taggedSrc := fmt.Sprintf("%s/test/img1:latest", u1.Host)
-	latestTag, _ := name.ParseReference(taggedSrc)
-
-	t.Logf("u1: %s", u1)
-	t.Logf("taggedSrc: %s", taggedSrc)
-
-	tl := &testLogger{t: t}
-	tr := &TagRemapper{
-		Logger: tl,
-	}
-
-	h := NewHistory(latestTag)
-	err = tr.ReMap(h)
-	if err != nil {
-		t.Fatalf("remap failed, %v", err)
-	}
-	newTag := h.LatestRef()
-	t.Logf("newTag: %v", newTag)
-
-	newDig, ok := newTag.(name.Digest)
-	if !ok {
-		t.Logf("newTag was not a digest, got %T", newTag)
-	}
-
-	if newDig.DigestStr() != imgHash.String() {
-		t.Logf("latest did not remap to correct digest:\n  exp: %s\n  got: %s\n", imgHash, newDig.DigestStr())
-	}
-
-	tr.CheckOnly = true
-	h = NewHistory(latestTag)
-	err = tr.ReMap(h)
-	if err != nil {
-		t.Fatalf("checkOnly remap failed, %v", err)
-	}
-	newTag = h.LatestRef()
-
-	if newTag.String() != latestTag.String() {
-		t.Fatalf("checkOnly altered tag:\n  exp: %s\n  got: %s", latestTag, newTag)
-	}
-}
-
-func TestRepoRemapper(t *testing.T) {
+func TestRenameRemapper(t *testing.T) {
 	base := "myreg.com/firstrepo/test/img1"
 	tagStr := fmt.Sprintf("%s:latest", base)
 	hashStr := "abcdabcdabceabcdabcdabcdabcdabcdabcdabcdabcaacbcbfedabcaefacbaea"
@@ -443,7 +376,7 @@ func TestRepoRemapper(t *testing.T) {
 
 	remoteStr := "secondrepo/imported"
 	tl := &testLogger{t: t}
-	rr := &RepoRemapper{
+	rr := &RenameRemapper{
 		RemotePath: remoteStr,
 		RemoteTmpl: tmplStr,
 		Logger:     tl,
