@@ -12,11 +12,14 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"net/http"
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
 	"text/template"
+	"time"
 
 	grafeas "cloud.google.com/go/grafeas/apiv1"
 	"github.com/AsaiYusuke/jsonpath"
@@ -724,12 +727,16 @@ type GrafeasClient interface {
 // VulnChecker checks that images have been scanned, and checks that
 // they do not contain unexpected vulnerabilities
 type VulnChecker struct {
-	Grafeas      GrafeasClient
-	Parent       string
-	MaxCVSS      float32
-	CVEAllowList []string
+	Grafeas       GrafeasClient
+	Parent        string
+	MaxCVSS       float32
+	CVEIgnoreList []string
+	RetryMax      int
+	RetryDelay    time.Duration
+
 	Logger
 
+	sync.Mutex
 	cveWhiteList map[string]struct{}
 }
 
@@ -814,16 +821,16 @@ func (ice *ImageCheckError) Error() string {
 }
 
 // Check checks an individual image.
-// TODO(tcm): should accept a list of images and check them concurrently
-// TODO(tcm): needs to retry if an image has not been scanned yet
-func (vc *VulnChecker) Check(ctx context.Context, dig name.Digest) error {
+func (vc *VulnChecker) check(ctx context.Context, dig name.Digest) error {
+	vc.Lock()
 	if vc.cveWhiteList == nil {
 
 		vc.cveWhiteList = map[string]struct{}{}
-		for _, str := range vc.CVEAllowList {
+		for _, str := range vc.CVEIgnoreList {
 			vc.cveWhiteList[str] = struct{}{}
 		}
 	}
+	vc.Unlock()
 
 	disc, err := vc.getDiscovery(ctx, dig)
 	if err != nil {
@@ -864,4 +871,23 @@ func (vc *VulnChecker) Check(ctx context.Context, dig name.Digest) error {
 	}
 
 	return nil
+}
+
+func (vc *VulnChecker) Check(ctx context.Context, dig name.Digest) error {
+	var err error
+	baseDelay := 500 * time.Millisecond
+	if vc.RetryDelay != 0 {
+		baseDelay = vc.RetryDelay
+	}
+	for i := 0; i <= vc.RetryMax; i++ {
+		err = vc.check(ctx, dig)
+		if !(errors.Is(err, ErrDiscoverNotFinished) || errors.Is(err, ErrDiscoveryNotFound)) {
+			return err
+		}
+		secRetry := math.Pow(2, float64(i))
+		delay := time.Duration(secRetry) * baseDelay
+		time.Sleep(delay)
+	}
+
+	return err
 }

@@ -9,6 +9,9 @@ Progress, YMMV, configuration and settings may change.
   - Exists (prevents deploy of manifests with bad references)
   - Remap tags (e.g latest) to a tag for the explicit digest they currently map to
   - Optionally syncs images from third party repositories to known repository
+  - Check that image scanning:
+    - has completed (with time limited check retry)
+    - images have no CVEs above a certain score (with overridable ignore list)
 
 This is intended to:
 - Prevent deploying assets with un-pullable images

@@ -15,7 +15,10 @@ import (
 	"log/slog"
 	"os"
 	"regexp"
+	"strings"
+	"sync"
 	"text/template"
+	"time"
 
 	containeranalysis "cloud.google.com/go/containeranalysis/apiv1"
 	"github.com/cerbos/reimage"
@@ -26,22 +29,26 @@ import (
 )
 
 type app struct {
-	Version              bool
-	MatcherString        string
-	matcher              *regexp.Regexp
-	RemotePath           string
-	RemoteTemplateString string
-	remoteTemplate       *template.Template
-	Clobber              bool
-	NoCopy               bool
-	RulesConfigFile      string
-	imagFinder           reimage.ImagesFinder
-	DryRun               bool
-	WriteMappings        string
-	WriteMappingsImg     string
-	StaticMappings       string
-	StaticMappingsImg    string
-	Debug                bool
+	Version                bool
+	MatcherString          string
+	matcher                *regexp.Regexp
+	RemotePath             string
+	RemoteTemplateString   string
+	remoteTemplate         *template.Template
+	Clobber                bool
+	NoCopy                 bool
+	RulesConfigFile        string
+	imagFinder             reimage.ImagesFinder
+	DryRun                 bool
+	WriteMappings          string
+	WriteMappingsImg       string
+	StaticMappings         string
+	StaticMappingsImg      string
+	VulnCheckGrafeasParent string
+	VulnCheckTimeout       time.Duration
+	VulnCheckIgnoreList    []string
+	VulnCheckMaxCVSS       float64
+	Debug                  bool
 
 	log *slog.Logger
 }
@@ -49,6 +56,7 @@ type app struct {
 func setup() (*app, error) {
 	var err error
 	a := app{}
+	vulnIgnoreStr := ""
 	flag.BoolVar(&a.Version, "V", false, "print version/build info")
 	flag.StringVar(&a.MatcherString, "ignore", "^$", "ignore images matching this expression")
 	flag.StringVar(&a.RemotePath, "remote-path", "", "template for remapping imported images")
@@ -62,11 +70,23 @@ func setup() (*app, error) {
 	flag.StringVar(&a.WriteMappingsImg, "write-json-mappings-img", "", "write final image mapping to a registry image")
 	flag.StringVar(&a.StaticMappings, "static-json-mappings-file", "", "take all mappings from a mappings file")
 	flag.StringVar(&a.StaticMappingsImg, "static-json-mappings-img", "", "take all mapping from a mappings registry image")
+	flag.StringVar(&a.VulnCheckGrafeasParent, "vulncheck-grafeas-parent", "", "value for the parent of the grafeas client (e.g. \"project/my-project-id\" for GCP")
+	flag.DurationVar(&a.VulnCheckTimeout, "vuln-check-timeout", 5*time.Minute, "how long to wait for vulnerability scanning to complete")
+	flag.StringVar(&vulnIgnoreStr, "vulncheck-ignore-list", "", "comma separated list of vulnerabilities to ignore")
+	flag.Float64Var(&a.VulnCheckMaxCVSS, "vulncheck-max-cvss", 9.0, "maximum CVSS vulnerabitility score")
 	flag.Parse()
 
 	if a.Version {
 		printVersion()
 		os.Exit(0)
+	}
+
+	for _, str := range strings.Split(vulnIgnoreStr, ",") {
+		str = strings.TrimSpace(str)
+		if str == "" {
+			continue
+		}
+		a.VulnCheckIgnoreList = append(a.VulnCheckIgnoreList, str)
 	}
 
 	log := a.setupLog()
@@ -296,57 +316,67 @@ func (a *app) buildRemapper() (reimage.Remapper, *reimage.RecorderRemapper, erro
 }
 
 // checkVulns most of this should move into the main package
-func (a *app) checkVulns(ctx context.Context, imgs map[string]reimage.QualifiedImage) {
-	project := `projects/cerbos-registry`
+func (a *app) checkVulns(ctx context.Context, imgs map[string]reimage.QualifiedImage) error {
 	c, err := containeranalysis.NewClient(ctx)
 	if err != nil {
-		a.log.Error(fmt.Errorf("failed creating containeranalysis client, %w", err).Error())
-		os.Exit(1)
+		return fmt.Errorf("failed creating containeranalysis client, %w", err)
 	}
+
+	errs := make([]error, len(imgs))
+	wg := &sync.WaitGroup{}
+	wg.Add(len(imgs))
+	i := 0
 	for _, img := range imgs {
-		checker := reimage.VulnChecker{
-			Parent:  project,
-			Grafeas: c.GetGrafeasClient(),
-			Logger:  a.log,
-			MaxCVSS: 9.0,
+		go func(img reimage.QualifiedImage, i int) {
+			defer wg.Done()
 
-			// This list will need to come in, probably comma separate CLI
-			// initially
-			CVEAllowList: []string{
-				"CVE-2005-2541",    // bug in tar
-				"CVE-2019-8457",    // SQLite3 DoS
-				"CVE-2019-1010022", // glibc bug, disputed
-				"CVE-2022-1996",    // emicklei/go-restful prior to v3.8.0.
-				"CVE-2022-37434",   // zlib bug
-				"CVE-2022-41924",   // tailscale windows client bug
-				"CVE-2023-29402",   // CGO bug, (fixed in 1.20.5)
-				"CVE-2023-29404",   // go get bug (fixed in 1.20.5)
-				"CVE-2023-29405",   // go get bug (fixed in 1.20.5)
-				"CVE-2023-24538",   // go html/template bug (fixed in 1.20.3)
-				"CVE-2023-24540",   // go html/template bug (fixed in 1.20.3)
-			},
-		}
-		ref, err := name.ParseReference(img.Tag)
-		if err != nil {
-			a.log.Error(fmt.Errorf("could not parse ref %q, %w", img, err).Error())
-			continue
-		}
+			vcCtx, vcCancel := context.WithTimeoutCause(ctx, a.VulnCheckTimeout, errors.New("timeout waiting for vuln-check"))
+			defer vcCancel()
 
-		desc, err := crane.Get(ref.String())
-		if err != nil {
-			a.log.Error(fmt.Errorf("could not get ref %q, %w", ref.String(), err).Error())
-			continue
-		}
+			checker := reimage.VulnChecker{
+				Parent:        a.VulnCheckGrafeasParent,
+				Grafeas:       c.GetGrafeasClient(),
+				MaxCVSS:       float32(a.VulnCheckMaxCVSS),
+				CVEIgnoreList: a.VulnCheckIgnoreList,
 
-		digestStr := desc.Digest.String()
-		dig := ref.Context().Registry.Repo(ref.Context().RepositoryStr()).Digest(digestStr)
+				Logger: a.log,
+			}
+			ref, err := name.ParseReference(img.Tag)
+			if err != nil {
+				errs[i] = fmt.Errorf("could not parse ref %q, %w", img, err)
+				return
+			}
 
-		err = checker.Check(ctx, dig)
-		if err != nil {
-			a.log.Error(fmt.Errorf("image check failed %q, %w", img, err).Error())
-			continue
+			desc, err := crane.Get(ref.String())
+			if err != nil {
+				errs[i] = fmt.Errorf("could not get ref %q, %w", ref.String(), err)
+				return
+			}
+
+			digestStr := desc.Digest.String()
+			dig := ref.Context().Registry.Repo(ref.Context().RepositoryStr()).Digest(digestStr)
+
+			err = checker.Check(vcCtx, dig)
+			if err != nil {
+				errs[i] = fmt.Errorf("image check failed %q, %w", img, err)
+				return
+			}
+		}(img, i)
+
+		i++
+	}
+
+	wg.Wait()
+
+	for _, err := range errs {
+		switch {
+		case errors.Is(err, context.Canceled):
+			// if there are any context cancelled errors, we'll just return one
+			// directly
+			return err
 		}
 	}
+	return errors.Join(errs...)
 }
 
 func main() {
@@ -381,7 +411,9 @@ func main() {
 		os.Exit(1)
 	}
 
-	app.checkVulns(context.Background(), mappings)
+	ctx := context.Background()
+
+	err = app.checkVulns(ctx, mappings)
 	if err != nil {
 		app.log.Error(fmt.Errorf("vulncheck failed, %w", err).Error())
 		os.Exit(1)
