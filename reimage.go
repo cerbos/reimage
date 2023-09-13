@@ -263,8 +263,10 @@ func needsUpdate(newRef name.Reference, old name.Digest, log Logger) (bool, erro
 }
 
 type QualifiedImage struct {
-	Tag    string `json:"tag"`
-	Digest string `json:"digest"`
+	Tag         string   `json:"tag"`
+	Digest      string   `json:"digest"`
+	IgnoredCVEs []string `json:"ignoredCVEs,omitempty"`
+	FoundCVEs   []string `json:"foundCVEs,omitempty"`
 }
 
 type StaticRemapper struct {
@@ -396,8 +398,8 @@ func (r *RecorderRemapper) Mappings() (map[string]QualifiedImage, error) {
 			Tag:    last.String(),
 			Digest: lastDig.DigestStr(),
 		}
-		if foundStr, ok := res[org.String()]; ok && foundStr != lastImg {
-			return nil, fmt.Errorf("remapping must be one to one, cannot map %s to %s aswell as %s", org, foundStr, last)
+		if foundStr, ok := res[org.String()]; ok && ((foundStr.Tag != lastImg.Tag) || (foundStr.Digest != lastImg.Digest)) {
+			return nil, fmt.Errorf("remapping must be one to one, cannot map %s to %s aswell as %s", org, foundStr.Digest, lastImg.Digest)
 		}
 		res[org.String()] = lastImg
 	}
@@ -726,6 +728,23 @@ type GrafeasClient interface {
 	ListOccurrences(ctx context.Context, req *grafeaspb.ListOccurrencesRequest, opts ...gax.CallOption) *grafeas.OccurrenceIterator
 }
 
+type VulnCheckerResult struct {
+	Ignored map[string][]string
+	Found   map[string][]string
+}
+
+func (vcr VulnCheckerResult) AnnotateMappings(mappings map[string]QualifiedImage) {
+	for img, qImg := range mappings {
+		if vcr.Ignored != nil {
+			qImg.IgnoredCVEs = vcr.Ignored[img]
+		}
+		if vcr.Found != nil {
+			qImg.FoundCVEs = vcr.Found[img]
+		}
+		mappings[img] = qImg
+	}
+}
+
 // VulnChecker checks that images have been scanned, and checks that
 // they do not contain unexpected vulnerabilities
 type VulnChecker struct {
@@ -740,7 +759,8 @@ type VulnChecker struct {
 	Logger
 
 	sync.Mutex
-	cveWhiteList map[string]struct{}
+	cveAllowList map[string]struct{}
+	res          VulnCheckerResult
 }
 
 var ErrDiscoveryNotFound = errors.New("discovery not found in response")
@@ -824,64 +844,74 @@ func (ice *ImageCheckError) Error() string {
 }
 
 // Check checks an individual image.
-func (vc *VulnChecker) check(ctx context.Context, dig name.Digest) error {
+func (vc *VulnChecker) check(ctx context.Context, dig name.Digest) (*CheckRes, error) {
 	vc.Lock()
-	if vc.cveWhiteList == nil {
-
-		vc.cveWhiteList = map[string]struct{}{}
+	if vc.cveAllowList == nil {
+		vc.cveAllowList = map[string]struct{}{}
 		for _, str := range vc.CVEIgnoreList {
-			vc.cveWhiteList[str] = struct{}{}
+			vc.cveAllowList[str] = struct{}{}
 		}
 	}
 	vc.Unlock()
 
+	res := CheckRes{}
+
 	disc, err := vc.getDiscovery(ctx, dig)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	switch disc.AnalysisStatus {
 	case grafeaspb.DiscoveryOccurrence_FINISHED_UNSUPPORTED:
-		return nil
+		return &res, nil
 	case grafeaspb.DiscoveryOccurrence_FINISHED_SUCCESS:
 	default:
-		return ErrDiscoverNotFinished
+		return nil, ErrDiscoverNotFinished
 	}
 
 	if vc.MaxCVSS == 0 {
-		return nil
+		return &res, nil
 	}
 
 	voccs, err := vc.getVulnerabilities(ctx, dig)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	badCVEs := map[string]float32{}
 	for _, vocc := range voccs {
-		if vocc.GetCvssScore() > vc.MaxCVSS {
-			if _, ok := vc.cveWhiteList[vocc.GetShortDescription()]; ok {
+		score := vocc.GetCvssScore()
+		cve := vocc.GetShortDescription()
+		if score > vc.MaxCVSS {
+			if _, ok := vc.cveAllowList[cve]; ok {
+				res.Ignored = append(res.Ignored, fmt.Sprintf("%s:%f", cve, score))
 				continue
 			}
-			badCVEs[vocc.GetShortDescription()] = vocc.GetCvssScore()
+			badCVEs[cve] = score
+			continue
 		}
+		res.Found = append(res.Found, fmt.Sprintf("%s:%f", cve, score))
 	}
 	if len(badCVEs) != 0 {
-		return &ImageCheckError{
+		return nil, &ImageCheckError{
 			Image:   dig.Name(),
 			MaxCVSS: vc.MaxCVSS,
 			CVEs:    badCVEs,
 		}
 	}
 
-	return nil
+	return &res, nil
 }
 
-func (vc *VulnChecker) Check(ctx context.Context, dig name.Digest) error {
-	var err error
+type CheckRes struct {
+	Ignored []string
+	Found   []string
+}
 
+func (vc *VulnChecker) Check(ctx context.Context, dig name.Digest) (*CheckRes, error) {
+	var err error
 	img := dig.String()
 	if vc.IgnoreImages != nil && vc.IgnoreImages.MatchString(img) {
-		return nil
+		return &CheckRes{}, nil
 	}
 
 	baseDelay := 500 * time.Millisecond
@@ -889,14 +919,21 @@ func (vc *VulnChecker) Check(ctx context.Context, dig name.Digest) error {
 		baseDelay = vc.RetryDelay
 	}
 	for i := 0; i <= vc.RetryMax; i++ {
-		err = vc.check(ctx, dig)
-		if !(errors.Is(err, ErrDiscoverNotFinished) || errors.Is(err, ErrDiscoveryNotFound)) {
-			return err
+		var res *CheckRes
+		res, err = vc.check(ctx, dig)
+
+		if err == nil {
+			return res, nil
 		}
+
+		if !(errors.Is(err, ErrDiscoverNotFinished) || errors.Is(err, ErrDiscoveryNotFound)) {
+			return nil, err
+		}
+
 		secRetry := math.Pow(2, float64(i))
 		delay := time.Duration(secRetry) * baseDelay
 		time.Sleep(delay)
 	}
 
-	return err
+	return nil, err
 }

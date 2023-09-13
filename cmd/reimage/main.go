@@ -338,25 +338,30 @@ func (a *app) checkVulns(ctx context.Context, imgs map[string]reimage.QualifiedI
 	}
 
 	errs := make([]error, len(imgs))
+
 	wg := &sync.WaitGroup{}
 	wg.Add(len(imgs))
+	checker := reimage.VulnChecker{
+		IgnoreImages:  a.vulnCheckIgnoreImages,
+		Parent:        a.VulnCheckGrafeasParent,
+		Grafeas:       c.GetGrafeasClient(),
+		MaxCVSS:       float32(a.VulnCheckMaxCVSS),
+		CVEIgnoreList: a.VulnCheckIgnoreList,
+
+		Logger: a.log,
+	}
+
+	res := map[string]reimage.QualifiedImage{}
+	resLock := &sync.Mutex{}
+
 	i := 0
-	for _, img := range imgs {
-		go func(img reimage.QualifiedImage, i int) {
+	for src, img := range imgs {
+		go func(src string, img reimage.QualifiedImage, i int) {
 			defer wg.Done()
 
 			vcCtx, vcCancel := context.WithTimeoutCause(ctx, a.VulnCheckTimeout, errors.New("timeout waiting for vuln-check"))
 			defer vcCancel()
 
-			checker := reimage.VulnChecker{
-				IgnoreImages:  a.vulnCheckIgnoreImages,
-				Parent:        a.VulnCheckGrafeasParent,
-				Grafeas:       c.GetGrafeasClient(),
-				MaxCVSS:       float32(a.VulnCheckMaxCVSS),
-				CVEIgnoreList: a.VulnCheckIgnoreList,
-
-				Logger: a.log,
-			}
 			ref, err := name.ParseReference(img.Tag)
 			if err != nil {
 				errs[i] = fmt.Errorf("could not parse ref %q, %w", img, err)
@@ -372,12 +377,18 @@ func (a *app) checkVulns(ctx context.Context, imgs map[string]reimage.QualifiedI
 			digestStr := desc.Digest.String()
 			dig := ref.Context().Registry.Repo(ref.Context().RepositoryStr()).Digest(digestStr)
 
-			err = checker.Check(vcCtx, dig)
+			cres, err := checker.Check(vcCtx, dig)
 			if err != nil {
 				errs[i] = fmt.Errorf("image check failed %q, %w", img, err)
 				return
 			}
-		}(img, i)
+
+			resLock.Lock()
+			defer resLock.Unlock()
+			img.FoundCVEs = cres.Found
+			img.IgnoredCVEs = cres.Ignored
+			res[src] = img
+		}(src, img, i)
 
 		i++
 	}
@@ -392,6 +403,11 @@ func (a *app) checkVulns(ctx context.Context, imgs map[string]reimage.QualifiedI
 			return err
 		}
 	}
+
+	for k, v := range res {
+		imgs[k] = v
+	}
+
 	return errors.Join(errs...)
 }
 
