@@ -30,10 +30,10 @@ import (
 
 type app struct {
 	Version                bool
-	MatcherString          string
-	matcher                *regexp.Regexp
-	RemotePath             string
-	RemoteTemplateString   string
+	RenameIgnore           string
+	renameIgnore           *regexp.Regexp
+	RenameRemotePath       string
+	RenameTemplateString   string
 	remoteTemplate         *template.Template
 	Clobber                bool
 	NoCopy                 bool
@@ -48,6 +48,8 @@ type app struct {
 	VulnCheckTimeout       time.Duration
 	VulnCheckIgnoreList    []string
 	VulnCheckMaxCVSS       float64
+	VulnCheckIgnoreImages  string
+	vulnCheckIgnoreImages  *regexp.Regexp
 	Debug                  bool
 
 	log *slog.Logger
@@ -58,22 +60,28 @@ func setup() (*app, error) {
 	a := app{}
 	vulnIgnoreStr := ""
 	flag.BoolVar(&a.Version, "V", false, "print version/build info")
-	flag.StringVar(&a.MatcherString, "ignore", "^$", "ignore images matching this expression")
-	flag.StringVar(&a.RemotePath, "remote-path", "", "template for remapping imported images")
-	flag.BoolVar(&a.Clobber, "clobber", false, "allow overwriting remote images")
-	flag.BoolVar(&a.NoCopy, "no-copy", false, "disable copying of renamed images")
-	flag.StringVar(&a.RemoteTemplateString, "remote", reimage.DefaultTemplateStr, "template for remapping imported images")
-	flag.StringVar(&a.RulesConfigFile, "rules-config", "", "yaml definition of kind/image-path mappings")
 	flag.BoolVar(&a.DryRun, "dryrun", false, "only log actions")
 	flag.BoolVar(&a.Debug, "debug", false, "enable debug logging")
+
+	flag.StringVar(&a.RulesConfigFile, "rules-config", "", "yaml definition of kind/image-path mappings")
+
+	flag.StringVar(&a.RenameIgnore, "rename-ignore", "^$", "ignore images matching this expression")
+	flag.StringVar(&a.RenameRemotePath, "rename-remote-path", "", "template for remapping imported images")
+	flag.StringVar(&a.RenameTemplateString, "rename-template", reimage.DefaultTemplateStr, "template for remapping imported images")
+
+	flag.BoolVar(&a.Clobber, "clobber", false, "allow overwriting remote images")
+	flag.BoolVar(&a.NoCopy, "no-copy", false, "disable copying of renamed images")
+
 	flag.StringVar(&a.WriteMappings, "write-json-mappings-file", "", "write final image mappings to a json file")
 	flag.StringVar(&a.WriteMappingsImg, "write-json-mappings-img", "", "write final image mapping to a registry image")
 	flag.StringVar(&a.StaticMappings, "static-json-mappings-file", "", "take all mappings from a mappings file")
 	flag.StringVar(&a.StaticMappingsImg, "static-json-mappings-img", "", "take all mapping from a mappings registry image")
+
 	flag.StringVar(&a.VulnCheckGrafeasParent, "vulncheck-grafeas-parent", "", "value for the parent of the grafeas client (e.g. \"project/my-project-id\" for GCP")
 	flag.DurationVar(&a.VulnCheckTimeout, "vuln-check-timeout", 5*time.Minute, "how long to wait for vulnerability scanning to complete")
-	flag.StringVar(&vulnIgnoreStr, "vulncheck-ignore-list", "", "comma separated list of vulnerabilities to ignore")
+	flag.StringVar(&vulnIgnoreStr, "vulncheck-ignore-cve-list", "", "comma separated list of vulnerabilities to ignore")
 	flag.Float64Var(&a.VulnCheckMaxCVSS, "vulncheck-max-cvss", 9.0, "maximum CVSS vulnerabitility score")
+	flag.StringVar(&a.VulnCheckIgnoreImages, "vulncheck-ignore-images", "", "regexp of images to skip for CVE checks")
 	flag.Parse()
 
 	if a.Version {
@@ -92,7 +100,13 @@ func setup() (*app, error) {
 	log := a.setupLog()
 	a.log = log
 
-	a.matcher = regexp.MustCompile(a.MatcherString)
+	if a.RenameIgnore != "" {
+		a.renameIgnore = regexp.MustCompile(a.RenameIgnore)
+	}
+
+	if a.VulnCheckIgnoreImages != "" {
+		a.vulnCheckIgnoreImages = regexp.MustCompile(a.VulnCheckIgnoreImages)
+	}
 
 	// What follows is horrid, and probably a sign of some abstraction breakdown
 	// But basically, if static mapping was specified, we disable/ignore
@@ -101,15 +115,15 @@ func setup() (*app, error) {
 		if a.StaticMappings != "" && a.StaticMappingsImg != "" {
 			return &a, fmt.Errorf("only one static mappings configuration is allowed")
 		}
-		if a.RemotePath != "" || a.RemoteTemplateString != reimage.DefaultTemplateStr {
+		if a.RenameRemotePath != "" || a.RenameTemplateString != reimage.DefaultTemplateStr {
 			log.Info("settings static mappings disables image renaming ")
-			a.RemotePath = ""
-			a.RemoteTemplateString = ""
+			a.RenameRemotePath = ""
+			a.RenameTemplateString = ""
 		}
 	}
 
-	if a.RemotePath != "" && a.RemoteTemplateString != "" {
-		a.remoteTemplate, err = template.New("remote").Parse(a.RemoteTemplateString)
+	if a.RenameRemotePath != "" && a.RenameTemplateString != "" {
+		a.remoteTemplate, err = template.New("remote").Parse(a.RenameTemplateString)
 		if err != nil {
 			return &a, fmt.Errorf("failed parsing remote template, %w", err)
 		}
@@ -292,7 +306,8 @@ func (a *app) buildRemapper() (reimage.Remapper, *reimage.RecorderRemapper, erro
 
 		if a.remoteTemplate != nil {
 			rm = append(rm, &reimage.RenameRemapper{
-				RemotePath: a.RemotePath,
+				Ignore:     a.renameIgnore,
+				RemotePath: a.RenameRemotePath,
 				RemoteTmpl: a.remoteTemplate,
 				Logger:     a.log,
 			})
@@ -334,6 +349,7 @@ func (a *app) checkVulns(ctx context.Context, imgs map[string]reimage.QualifiedI
 			defer vcCancel()
 
 			checker := reimage.VulnChecker{
+				IgnoreImages:  a.vulnCheckIgnoreImages,
 				Parent:        a.VulnCheckGrafeasParent,
 				Grafeas:       c.GetGrafeasClient(),
 				MaxCVSS:       float32(a.VulnCheckMaxCVSS),
@@ -394,7 +410,6 @@ func main() {
 	}
 
 	s := &reimage.RemapUpdater{
-		Ignore:                   app.matcher,
 		Remapper:                 rm,
 		UnstructuredImagesFinder: app.imagFinder,
 	}

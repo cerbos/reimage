@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"net/http/httptest"
 	"net/url"
+	"regexp"
 	"strconv"
 	"strings"
 	"testing"
@@ -383,6 +384,39 @@ func TestRenameRemapper(t *testing.T) {
 	}
 
 	exp := fmt.Sprintf("%s/%s:%s", remoteStr, base, hashStr)
+
+	err = rr.ReMap(h)
+	if err != nil {
+		t.Fatalf("remap failed, %v", err)
+	}
+	newTag := h.LatestRef()
+	if newTag.String() != exp {
+		t.Fatalf("incorred latest tag:\n  got: %s\n  exp: %s\n", newTag.String(), exp)
+	}
+}
+
+func TestRenameRemapper_Ignore(t *testing.T) {
+	base := "myreg.com/firstrepo/test/img1"
+	tagStr := fmt.Sprintf("%s:latest", base)
+
+	tagRef, err := name.ParseReference(tagStr)
+	if err != nil {
+		t.Fatalf("test borked, %v", err)
+	}
+	h := NewHistory(tagRef)
+
+	tmplStr := template.Must(template.New("test").Parse(`{{ .RemotePath }}/{{ .Registry}}/{{ .Repository }}:{{ .DigestHex }}`))
+
+	remoteStr := "secondrepo/imported"
+	tl := &testLogger{t: t}
+	rr := &RenameRemapper{
+		Ignore:     regexp.MustCompile("^myreg.com/firstrepo/"),
+		RemotePath: remoteStr,
+		RemoteTmpl: tmplStr,
+		Logger:     tl,
+	}
+
+	exp := tagStr
 
 	err = rr.ReMap(h)
 	if err != nil {

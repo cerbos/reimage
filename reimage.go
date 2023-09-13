@@ -159,6 +159,7 @@ type RepoTemplateInput struct {
 // and the copy is performed using crane.Copy. reimage will then optionally
 // copy the image to the new locatio
 type RenameRemapper struct {
+	Ignore     *regexp.Regexp
 	RemotePath string             // used for the .RemotePath value in the template
 	RemoteTmpl *template.Template // template to build the final image string
 
@@ -172,6 +173,11 @@ func (t *RenameRemapper) ReMap(h *History) error {
 	var err error
 	ref := h.LatestRef()
 	refCtx := ref.Context()
+
+	img := ref.String()
+	if img == "" || (t.Ignore != nil && t.Ignore.MatchString(img)) {
+		return nil
+	}
 
 	digest, err := h.OriginalDigest()
 	if err != nil {
@@ -411,15 +417,11 @@ type ImagesFinder interface {
 // For Objects of unknown types the UnstructuredImagesFinder is used.
 // TODO(tcm): rename this thinger.
 type RemapUpdater struct {
-	Ignore                   *regexp.Regexp
 	UnstructuredImagesFinder ImagesFinder
 	Remapper                 Remapper
 }
 
 func (s *RemapUpdater) remapImageString(img string) (string, error) {
-	if img == "" || s.Ignore.MatchString(img) {
-		return img, nil
-	}
 	ref, err := name.ParseReference(img)
 	if err != nil {
 		return "", fmt.Errorf("could not parse image ref %s, %w", img, err)
@@ -727,6 +729,7 @@ type GrafeasClient interface {
 // VulnChecker checks that images have been scanned, and checks that
 // they do not contain unexpected vulnerabilities
 type VulnChecker struct {
+	IgnoreImages  *regexp.Regexp
 	Grafeas       GrafeasClient
 	Parent        string
 	MaxCVSS       float32
@@ -875,6 +878,12 @@ func (vc *VulnChecker) check(ctx context.Context, dig name.Digest) error {
 
 func (vc *VulnChecker) Check(ctx context.Context, dig name.Digest) error {
 	var err error
+
+	img := dig.String()
+	if vc.IgnoreImages != nil && vc.IgnoreImages.MatchString(img) {
+		return nil
+	}
+
 	baseDelay := 500 * time.Millisecond
 	if vc.RetryDelay != 0 {
 		baseDelay = vc.RetryDelay
