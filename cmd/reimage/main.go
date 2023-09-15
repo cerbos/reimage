@@ -30,6 +30,7 @@ import (
 
 type app struct {
 	Version                bool
+	MappingsOnly           bool
 	RenameIgnore           string
 	renameIgnore           *regexp.Regexp
 	RenameRemotePath       string
@@ -44,6 +45,7 @@ type app struct {
 	WriteMappingsImg       string
 	StaticMappings         string
 	StaticMappingsImg      string
+	static                 *reimage.StaticRemapper
 	VulnCheckGrafeasParent string
 	VulnCheckTimeout       time.Duration
 	VulnCheckIgnoreList    []string
@@ -65,6 +67,8 @@ func setup() (*app, error) {
 
 	flag.StringVar(&a.RulesConfigFile, "rules-config", "", "yaml definition of kind/image-path mappings")
 
+	flag.BoolVar(&a.MappingsOnly, "mappings-only", false, "skip yaml processing, and image copying,  and just run checks and attestations from images in mappings")
+
 	flag.StringVar(&a.RenameIgnore, "rename-ignore", "^$", "ignore images matching this expression")
 	flag.StringVar(&a.RenameRemotePath, "rename-remote-path", "", "template for remapping imported images")
 	flag.StringVar(&a.RenameTemplateString, "rename-template", reimage.DefaultTemplateStr, "template for remapping imported images")
@@ -82,6 +86,16 @@ func setup() (*app, error) {
 	flag.StringVar(&vulnIgnoreStr, "vulncheck-ignore-cve-list", "", "comma separated list of vulnerabilities to ignore")
 	flag.Float64Var(&a.VulnCheckMaxCVSS, "vulncheck-max-cvss", 9.0, "maximum CVSS vulnerabitility score")
 	flag.StringVar(&a.VulnCheckIgnoreImages, "vulncheck-ignore-images", "", "regexp of images to skip for CVE checks")
+
+	/*
+		  -gcp-attestor-project
+			-gcp-kms-key
+		  -gcp-kms-key-version
+			-gcp-kms-location
+			-gcp-kms-keyring
+			-gcp-kms-project
+	*/
+
 	flag.Parse()
 
 	if a.Version {
@@ -120,6 +134,10 @@ func setup() (*app, error) {
 			a.RenameRemotePath = ""
 			a.RenameTemplateString = ""
 		}
+	}
+
+	if a.MappingsOnly && (a.StaticMappings == "" && a.StaticMappingsImg == "") {
+		return &a, fmt.Errorf("mappings-only requested, but no static mapping file of image specified")
 	}
 
 	if a.RenameRemotePath != "" && a.RenameTemplateString != "" {
@@ -202,7 +220,7 @@ func readStaticMappingsFile(src string) ([]byte, error) {
 	return os.ReadFile(src)
 }
 
-func (a *app) readStaticMappings() (*reimage.StaticRemapper, error) {
+func (a *app) readStaticMappings(confirmDigests bool) (*reimage.StaticRemapper, error) {
 	var bs []byte
 	var err error
 	switch {
@@ -223,7 +241,7 @@ func (a *app) readStaticMappings() (*reimage.StaticRemapper, error) {
 	if err != nil {
 		return nil, fmt.Errorf("could not parse as JSON map, %v", err)
 	}
-	return reimage.NewStaticRemapper(rimgs)
+	return reimage.NewStaticRemapper(rimgs, confirmDigests)
 }
 
 func (a *app) writeMappings(mappings map[string]reimage.QualifiedImage) (err error) {
@@ -282,28 +300,20 @@ func (a *app) setupLog() *slog.Logger {
 	return log
 }
 
-func (a *app) buildRemapper() (reimage.Remapper, *reimage.RecorderRemapper, error) {
+func (a *app) buildRemapper(checkDigests bool) (reimage.Remapper, *reimage.RecorderRemapper, error) {
+	var err error
 	rm := reimage.MultiRemapper{}
 
-	static, err := a.readStaticMappings()
+	a.static, err = a.readStaticMappings(checkDigests)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed reading static remappings, %w", err)
 	}
 
-	if static != nil {
-		rm = append(rm, static)
+	if a.static != nil {
+		rm = append(rm, a.static)
 	}
 
-	if static == nil {
-		/*
-			tagRemapper := &reimage.TagRemapper{
-				CheckOnly: true,
-				Logger:    a.log,
-			}
-
-			rm = append(rm, tagRemapper)
-		*/
-
+	if a.static == nil {
 		if a.remoteTemplate != nil {
 			rm = append(rm, &reimage.RenameRemapper{
 				Ignore:     a.renameIgnore,
@@ -362,20 +372,14 @@ func (a *app) checkVulns(ctx context.Context, imgs map[string]reimage.QualifiedI
 			vcCtx, vcCancel := context.WithTimeoutCause(ctx, a.VulnCheckTimeout, errors.New("timeout waiting for vuln-check"))
 			defer vcCancel()
 
+			a.log.Debug("start checks on", "img", img.Tag)
 			ref, err := name.ParseReference(img.Tag)
 			if err != nil {
 				errs[i] = fmt.Errorf("could not parse ref %q, %w", img, err)
 				return
 			}
 
-			desc, err := crane.Get(ref.String())
-			if err != nil {
-				errs[i] = fmt.Errorf("could not get ref %q, %w", ref.String(), err)
-				return
-			}
-
-			digestStr := desc.Digest.String()
-			dig := ref.Context().Registry.Repo(ref.Context().RepositoryStr()).Digest(digestStr)
+			dig := ref.Context().Registry.Repo(ref.Context().RepositoryStr()).Digest(img.Digest)
 
 			cres, err := checker.Check(vcCtx, dig)
 			if err != nil {
@@ -419,24 +423,43 @@ func main() {
 		os.Exit(1)
 	}
 
-	rm, recorder, err := app.buildRemapper()
+	app.log.Debug("reimage started")
+
+	var mappings map[string]reimage.QualifiedImage
+	rm, recorder, err := app.buildRemapper(!app.MappingsOnly)
 	if err != nil {
 		app.log.Error(err.Error())
 		os.Exit(1)
 	}
 
-	s := &reimage.RemapUpdater{
-		Remapper:                 rm,
-		UnstructuredImagesFinder: app.imagFinder,
+	if !app.MappingsOnly {
+		s := &reimage.RemapUpdater{
+			Remapper:                 rm,
+			UnstructuredImagesFinder: app.imagFinder,
+		}
+
+		err = reimage.Process(os.Stdout, os.Stdin, s)
+		if err != nil {
+			app.log.Error(fmt.Errorf("failed processing input, %w", err).Error())
+			os.Exit(1)
+		}
+
+	} else {
+		// we run this through the remapper so that we'll still copy images
+		// if requested
+		for k := range app.static.Mappings {
+			// ref was already parsed during loading of mappings
+			ref, _ := name.ParseReference(k)
+			h := reimage.NewHistory(ref)
+			err = rm.ReMap(h)
+			if err != nil {
+				app.log.Error(fmt.Errorf("failed processing input, %w", err).Error())
+				os.Exit(1)
+			}
+		}
 	}
 
-	err = reimage.Process(os.Stdout, os.Stdin, s)
-	if err != nil {
-		app.log.Error(fmt.Errorf("failed processing input, %w", err).Error())
-		os.Exit(1)
-	}
-
-	mappings, err := recorder.Mappings()
+	mappings, err = recorder.Mappings()
 	if err != nil {
 		app.log.Error(fmt.Errorf("mappings were invalid, %w", err).Error())
 		os.Exit(1)

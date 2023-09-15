@@ -274,7 +274,7 @@ type StaticRemapper struct {
 	AllowMissing bool
 }
 
-func NewStaticRemapper(mps map[string]QualifiedImage) (*StaticRemapper, error) {
+func NewStaticRemapper(mps map[string]QualifiedImage, confirmDigest bool) (*StaticRemapper, error) {
 	for k, v := range mps {
 		_, err := name.ParseReference(k)
 		if err != nil {
@@ -286,6 +286,9 @@ func NewStaticRemapper(mps map[string]QualifiedImage) (*StaticRemapper, error) {
 			return nil, fmt.Errorf("could not parse mapping value %s, %w", v.Tag, err)
 		}
 
+		if !confirmDigest {
+			continue
+		}
 		dig, err := crane.Digest(v.Tag)
 		if err != nil {
 			return nil, fmt.Errorf("could not check digest for %s, %w", v.Tag, err)
@@ -921,7 +924,6 @@ func (vc *VulnChecker) Check(ctx context.Context, dig name.Digest) (*CheckRes, e
 	for i := 0; i <= vc.RetryMax; i++ {
 		var res *CheckRes
 		res, err = vc.check(ctx, dig)
-
 		if err == nil {
 			return res, nil
 		}
