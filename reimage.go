@@ -8,6 +8,8 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -38,6 +40,9 @@ import (
 	"k8s.io/apimachinery/pkg/util/yaml"
 	"k8s.io/cli-runtime/pkg/printers"
 
+	kms "cloud.google.com/go/kms/apiv1"
+	kmspb "cloud.google.com/go/kms/apiv1/kmspb"
+	"google.golang.org/api/binaryauthorization/v1"
 	"google.golang.org/api/iterator"
 	grafeaspb "google.golang.org/genproto/googleapis/grafeas/v1"
 )
@@ -743,6 +748,7 @@ func CompileJSONImageFinders(jmCfgs []JSONImageFinderConfig) (ImagesFinder, erro
 // GrafeasClient still isn't mockable, need to wrap it
 type GrafeasClient interface {
 	ListOccurrences(ctx context.Context, req *grafeaspb.ListOccurrencesRequest, opts ...gax.CallOption) *grafeas.OccurrenceIterator
+	CreateOccurrence(ctx context.Context, req *grafeaspb.CreateOccurrenceRequest, opts ...gax.CallOption) (*grafeaspb.Occurrence, error)
 }
 
 type VulnCheckerResult struct {
@@ -952,4 +958,144 @@ func (vc *VulnChecker) Check(ctx context.Context, dig name.Digest) (*CheckRes, e
 	}
 
 	return nil, err
+}
+
+type GCPBinAuthzPayload struct {
+	DockerReference      string
+	DockerManifestDigest string
+}
+
+func (pl *GCPBinAuthzPayload) MarshalJSON() ([]byte, error) {
+	jpl := struct {
+		Critical struct {
+			Identity struct {
+				DockerReference string `json:"docker-reference"`
+			} `json"identitiy"`
+			Image struct {
+				DockerManifestDigest string `json:"docker-manifest-digest"`
+			} `json"image"`
+			Type string `json:"type"`
+		} `json:"critical"`
+	}{}
+
+	jpl.Critical.Identity.DockerReference = pl.DockerReference
+	jpl.Critical.Image.DockerManifestDigest = pl.DockerManifestDigest
+	jpl.Critical.Type = "Google cloud binauthz container signature"
+
+	return json.Marshal(jpl)
+}
+
+type KMSSigner struct {
+	Project  string
+	Location string
+	Ring     string
+	Key      string
+	Version  string
+}
+
+func (ks *KMSSigner) Sign(ctx context.Context, bs []byte) ([]byte, error) {
+	kc, err := kms.NewKeyManagementClient(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	keyname := fmt.Sprintf(
+		"projects/%s/locations/%s/keyRings/%s/cryptoKeys/%s/cryptoKeyVersions/%s",
+		ks.Project,
+		ks.Location,
+		ks.Ring,
+		ks.Key,
+		ks.Version,
+	)
+
+	h := sha256.New()
+	h.Write(bs)
+	digest := h.Sum(nil)
+
+	kcreq := &kmspb.AsymmetricSignRequest{
+		Name: keyname,
+		Digest: &kmspb.Digest{
+			Digest: &kmspb.Digest_Sha256{Sha256: digest},
+		},
+	}
+
+	kcresp, err := kc.AsymmetricSign(ctx, kcreq)
+	if err != nil {
+		return nil, err
+	}
+
+	return kcresp.Signature, nil
+}
+
+func blah() error {
+	attestorPrj := ""
+	attestorName := ""
+	img := ""
+	imgDigestStr := ""
+	keyProject, keyLocation, keyRing, keyName, keyVersion := "", "", "", "", ""
+
+	ctx := context.Background()
+
+	var grafeas GrafeasClient
+
+	bauthz, err := binaryauthorization.NewService(ctx)
+	if err != nil {
+		return nil
+	}
+
+	attestor := fmt.Sprintf("projects/%s/attestors/%s", attestorPrj, attestorName)
+
+	payload := GCPBinAuthzPayload{
+		DockerReference:      img,
+		DockerManifestDigest: imgDigestStr,
+	}
+
+	payloadBytes, err := json.Marshal(payload)
+	if err != nil {
+		return nil
+	}
+
+	ks := KMSSigner{
+		Project:  keyProject,
+		Location: keyLocation,
+		Ring:     keyRing,
+		Key:      keyName,
+		Version:  keyVersion,
+	}
+	sig, err := ks.Sign(ctx, payloadBytes)
+	if err != nil {
+		return nil
+	}
+
+	att, err := bauthz.Projects.Attestors.Get(attestor).Do()
+	if err != nil {
+		return nil
+	}
+
+	noteRef := att.UserOwnedGrafeasNote.NoteReference
+	kid := att.UserOwnedGrafeasNote.PublicKeys[0].Id
+
+	occSig := &grafeaspb.Signature{
+		Signature:   sig,
+		PublicKeyId: kid,
+	}
+
+	occAtt := &grafeaspb.Occurrence_Attestation{
+		Attestation: &grafeaspb.AttestationOccurrence{
+			SerializedPayload: payloadBytes,
+			Signatures:        []*grafeaspb.Signature{occSig},
+		},
+	}
+
+	occReq := &grafeaspb.CreateOccurrenceRequest{
+		Occurrence: &grafeaspb.Occurrence{
+			NoteName:    noteRef,
+			ResourceUri: img,
+			Details:     occAtt,
+		},
+	}
+
+	_, err = grafeas.CreateOccurrence(ctx, occReq)
+
+	return err
 }

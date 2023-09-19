@@ -53,7 +53,18 @@ type app struct {
 	VulnCheckMaxCVSS       float64
 	VulnCheckIgnoreImages  string
 	vulnCheckIgnoreImages  *regexp.Regexp
-	Debug                  bool
+
+	AttestorProject string
+	AttestorName    string
+	SignAttestor    bool
+
+	GCPKMSProject    string
+	GCPKMSKey        string
+	GCPKMSKeyVersion string
+	GCPKMSLocation   string
+	GCPKMSKeyring    string
+
+	Debug bool
 
 	log *slog.Logger
 }
@@ -353,10 +364,11 @@ func (a *app) checkVulns(ctx context.Context, imgs map[string]reimage.QualifiedI
 
 	wg := &sync.WaitGroup{}
 	wg.Add(len(imgs))
+	gc := c.GetGrafeasClient()
 	checker := reimage.VulnChecker{
 		IgnoreImages:  a.vulnCheckIgnoreImages,
 		Parent:        a.VulnCheckGrafeasParent,
-		Grafeas:       c.GetGrafeasClient(),
+		Grafeas:       gc,
 		MaxCVSS:       float32(a.VulnCheckMaxCVSS),
 		CVEIgnoreList: a.VulnCheckIgnoreList,
 
