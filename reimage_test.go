@@ -356,7 +356,7 @@ func newTestRegistryLogger(t *testing.T) registry.Option {
 }
 
 func TestRenameRemapper(t *testing.T) {
-	base := "myreg.com/firstrepo/test/img1"
+	base := "example.com/firstrepo/test/img1"
 	tagStr := fmt.Sprintf("%s:latest", base)
 	hashStr := "abcdabcdabceabcdabcdabcdabcdabcdabcdabcdabcaacbcbfedabcaefacbaea"
 
@@ -371,7 +371,7 @@ func TestRenameRemapper(t *testing.T) {
 		t.Fatalf("test borked digest, %v", err)
 	}
 	h := NewHistory(tagRef)
-	h.Add(digRef, "adding digest")
+	h.AddDigest(digRef.(name.Digest))
 
 	tmplStr := template.Must(template.New("test").Parse(`{{ .RemotePath }}/{{ .Registry}}/{{ .Repository }}:{{ .DigestHex }}`))
 
@@ -389,14 +389,14 @@ func TestRenameRemapper(t *testing.T) {
 	if err != nil {
 		t.Fatalf("remap failed, %v", err)
 	}
-	newTag := h.LatestRef()
+	newTag := h.Latest()
 	if newTag.String() != exp {
 		t.Fatalf("incorred latest tag:\n  got: %s\n  exp: %s\n", newTag.String(), exp)
 	}
 }
 
 func TestRenameRemapper_Ignore(t *testing.T) {
-	base := "myreg.com/firstrepo/test/img1"
+	base := "example.com/firstrepo/test/img1"
 	tagStr := fmt.Sprintf("%s:latest", base)
 
 	tagRef, err := name.ParseReference(tagStr)
@@ -410,7 +410,7 @@ func TestRenameRemapper_Ignore(t *testing.T) {
 	remoteStr := "secondrepo/imported"
 	tl := &testLogger{t: t}
 	rr := &RenameRemapper{
-		Ignore:     regexp.MustCompile("^myreg.com/firstrepo/"),
+		Ignore:     regexp.MustCompile("^example.com/firstrepo/"),
 		RemotePath: remoteStr,
 		RemoteTmpl: tmplStr,
 		Logger:     tl,
@@ -422,7 +422,7 @@ func TestRenameRemapper_Ignore(t *testing.T) {
 	if err != nil {
 		t.Fatalf("remap failed, %v", err)
 	}
-	newTag := h.LatestRef()
+	newTag := h.Latest()
 	if newTag.String() != exp {
 		t.Fatalf("incorred latest tag:\n  got: %s\n  exp: %s\n", newTag.String(), exp)
 	}
@@ -469,7 +469,7 @@ func TestEnsureRemapper(t *testing.T) {
 	newTag, _ := name.ParseReference(dst)
 
 	h := NewHistory(imgTag)
-	h.Add(newTag, "renamed")
+	h.Add(newTag)
 
 	tl := &testLogger{t: t}
 	er := &EnsureRemapper{
@@ -506,7 +506,7 @@ func TestRemapUpdater(t *testing.T) {
 	for i, tt := range tests {
 		tt := tt
 		t.Run(strconv.Itoa(i), func(t *testing.T) {
-			ru := RemapUpdater{}
+			ru := RenameUpdater{}
 			err := ru.Update(tt.obj)
 			if err != nil {
 				t.Fatalf("RemapUpdater failed, %v", err)

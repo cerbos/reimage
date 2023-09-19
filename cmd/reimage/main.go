@@ -36,6 +36,7 @@ type app struct {
 	RenameRemotePath       string
 	RenameTemplateString   string
 	remoteTemplate         *template.Template
+	RenameForceToDigest    bool
 	Clobber                bool
 	NoCopy                 bool
 	RulesConfigFile        string
@@ -72,6 +73,7 @@ func setup() (*app, error) {
 	flag.StringVar(&a.RenameIgnore, "rename-ignore", "^$", "ignore images matching this expression")
 	flag.StringVar(&a.RenameRemotePath, "rename-remote-path", "", "template for remapping imported images")
 	flag.StringVar(&a.RenameTemplateString, "rename-template", reimage.DefaultTemplateStr, "template for remapping imported images")
+	flag.BoolVar(&a.RenameForceToDigest, "rename-force-digest", false, "the final renamed image will be transformed to digest form before output")
 
 	flag.BoolVar(&a.Clobber, "clobber", false, "allow overwriting remote images")
 	flag.BoolVar(&a.NoCopy, "no-copy", false, "disable copying of renamed images")
@@ -433,9 +435,10 @@ func main() {
 	}
 
 	if !app.MappingsOnly {
-		s := &reimage.RemapUpdater{
+		s := &reimage.RenameUpdater{
 			Remapper:                 rm,
 			UnstructuredImagesFinder: app.imagFinder,
+			ForceDigests:             app.RenameForceToDigest,
 		}
 
 		err = reimage.Process(os.Stdout, os.Stdin, s)
