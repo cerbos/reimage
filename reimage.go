@@ -8,10 +8,15 @@ import (
 	"bufio"
 	"bytes"
 	"context"
-	"crypto/sha256"
+	"crypto"
+	"crypto/rsa"
+	"crypto/sha512"
+	"crypto/x509"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"fmt"
+	"hash/crc32"
 	"io"
 	"log/slog"
 	"math"
@@ -40,11 +45,10 @@ import (
 	"k8s.io/apimachinery/pkg/util/yaml"
 	"k8s.io/cli-runtime/pkg/printers"
 
-	kms "cloud.google.com/go/kms/apiv1"
 	kmspb "cloud.google.com/go/kms/apiv1/kmspb"
-	"google.golang.org/api/binaryauthorization/v1"
 	"google.golang.org/api/iterator"
 	grafeaspb "google.golang.org/genproto/googleapis/grafeas/v1"
+	"google.golang.org/protobuf/types/known/wrapperspb"
 )
 
 func mustCompile(cfgs []JSONImageFinderConfig) ImagesFinder {
@@ -789,9 +793,10 @@ type VulnChecker struct {
 var ErrDiscoveryNotFound = errors.New("discovery not found in response")
 
 func (vc *VulnChecker) getDiscovery(ctx context.Context, dig name.Digest) (*grafeaspb.DiscoveryOccurrence, error) {
+	kind := grafeaspb.NoteKind_DISCOVERY
 	req := &grafeaspb.ListOccurrencesRequest{
 		Parent: vc.Parent,
-		Filter: fmt.Sprintf(`((kind = "DISCOVERY") AND (resourceUrl = "https://%s"))`, dig),
+		Filter: fmt.Sprintf(`((kind = "%s") AND (resourceUrl = "https://%s"))`, kind, dig),
 	}
 	occs := vc.Grafeas.ListOccurrences(ctx, req)
 	for {
@@ -803,7 +808,7 @@ func (vc *VulnChecker) getDiscovery(ctx context.Context, dig name.Digest) (*graf
 			return nil, err
 		}
 		switch occ.GetKind() {
-		case grafeaspb.NoteKind_DISCOVERY:
+		case kind:
 			return occ.GetDiscovery(), nil
 		}
 	}
@@ -970,10 +975,10 @@ func (pl *GCPBinAuthzPayload) MarshalJSON() ([]byte, error) {
 		Critical struct {
 			Identity struct {
 				DockerReference string `json:"docker-reference"`
-			} `json"identitiy"`
+			} `json:"identitiy"`
 			Image struct {
 				DockerManifestDigest string `json:"docker-manifest-digest"`
-			} `json"image"`
+			} `json:"image"`
 			Type string `json:"type"`
 		} `json:"critical"`
 	}{}
@@ -985,95 +990,217 @@ func (pl *GCPBinAuthzPayload) MarshalJSON() ([]byte, error) {
 	return json.Marshal(jpl)
 }
 
-type KMSSigner struct {
-	Project  string
-	Location string
-	Ring     string
-	Key      string
-	Version  string
-}
+/*
+kc, err := kms.NewKeyManagementClient(ctx)
 
-func (ks *KMSSigner) Sign(ctx context.Context, bs []byte) ([]byte, error) {
-	kc, err := kms.NewKeyManagementClient(ctx)
 	if err != nil {
 		return nil, err
 	}
+*/
+type KMSClient interface {
+	AsymmetricSign(ctx context.Context, req *kmspb.AsymmetricSignRequest, opts ...gax.CallOption) (*kmspb.AsymmetricSignResponse, error)
+	GetPublicKey(ctx context.Context, req *kmspb.GetPublicKeyRequest, opts ...gax.CallOption) (*kmspb.PublicKey, error)
+}
 
-	keyname := fmt.Sprintf(
-		"projects/%s/locations/%s/keyRings/%s/cryptoKeys/%s/cryptoKeyVersions/%s",
-		ks.Project,
-		ks.Location,
-		ks.Ring,
-		ks.Key,
-		ks.Version,
-	)
+type KMS struct {
+	Client KMSClient
+	Key    string
+}
 
-	h := sha256.New()
+func (ks *KMS) Sign(ctx context.Context, bs []byte) ([]byte, string, error) {
+	h := sha512.New()
 	h.Write(bs)
 	digest := h.Sum(nil)
 
+	crc32c := func(data []byte) uint32 {
+		t := crc32.MakeTable(crc32.Castagnoli)
+		return crc32.Checksum(data, t)
+
+	}
+	digestCRC32C := crc32c(h.Sum(nil))
+
 	kcreq := &kmspb.AsymmetricSignRequest{
-		Name: keyname,
+		Name: ks.Key,
 		Digest: &kmspb.Digest{
-			Digest: &kmspb.Digest_Sha256{Sha256: digest},
+			Digest: &kmspb.Digest_Sha512{Sha512: digest},
 		},
+		DigestCrc32C: wrapperspb.Int64(int64(digestCRC32C)),
 	}
 
-	kcresp, err := kc.AsymmetricSign(ctx, kcreq)
+	kcresp, err := ks.Client.AsymmetricSign(ctx, kcreq)
 	if err != nil {
-		return nil, err
+		return nil, "", err
+	}
+	if !kcresp.VerifiedDigestCrc32C {
+		return nil, "", fmt.Errorf("AsymmetricSign request corrupted in-transit")
+	}
+	if kcresp.Name != kcreq.Name {
+		return nil, "", fmt.Errorf("AsymmetricSign request corrupted in-transit")
+	}
+	if int64(crc32c(kcresp.Signature)) != kcresp.SignatureCrc32C.Value {
+		return nil, "", fmt.Errorf("AsymmetricSign response corrupted in-transit")
 	}
 
-	return kcresp.Signature, nil
+	return kcresp.Signature, kcresp.Name, nil
 }
 
-func blah() error {
-	attestorPrj := ""
-	attestorName := ""
-	img := ""
-	imgDigestStr := ""
-	keyProject, keyLocation, keyRing, keyName, keyVersion := "", "", "", "", ""
+func (ks *KMS) Verify(ctx context.Context, bs []byte, sig []byte) error {
+	h := sha512.New()
+	h.Write(bs)
+	digest := h.Sum(nil)
 
-	ctx := context.Background()
+	kcreq := &kmspb.GetPublicKeyRequest{
+		Name: ks.Key,
+	}
 
-	var grafeas GrafeasClient
-
-	bauthz, err := binaryauthorization.NewService(ctx)
+	pk, err := ks.Client.GetPublicKey(ctx, kcreq)
 	if err != nil {
+		return err
+	}
+
+	block, _ := pem.Decode([]byte(pk.GetPem()))
+	publicKey, err := x509.ParsePKIXPublicKey(block.Bytes)
+	if err != nil {
+		return fmt.Errorf("failed to parse public key: %w", err)
+	}
+	rsaKey, ok := publicKey.(*rsa.PublicKey)
+	if !ok {
+		return fmt.Errorf("public key is not rsa")
+	}
+
+	if err := rsa.VerifyPSS(rsaKey, crypto.SHA512, digest[:], sig, &rsa.PSSOptions{
+		SaltLength: len(digest),
+		Hash:       crypto.SHA512,
+	}); err != nil {
+		return fmt.Errorf("failed to verify signature, %w", err)
+	}
+
+	return nil
+}
+
+var ErrAttestationNotFound = errors.New("attestation not found in response")
+
+type Signer interface {
+	Sign(ctx context.Context, bs []byte) ([]byte, string, error)
+}
+
+type Verifier interface {
+	Verify(ctx context.Context, bs []byte, sig []byte) error
+}
+
+type GrafeasAttestationChecker struct {
+	Grafeas GrafeasClient
+	Parent  string
+
+	Verifier
+
+	Logger
+}
+
+// Get retrieves all the Attestation occurences for the given image that use the provided
+// noteRef (or all if noteRef is "")
+func (ac *GrafeasAttestationChecker) Get(ctx context.Context, dig name.Digest, noteRef string) ([]*grafeaspb.AttestationOccurrence, error) {
+	kind := grafeaspb.NoteKind_ATTESTATION
+	req := &grafeaspb.ListOccurrencesRequest{
+		Parent: ac.Parent,
+		Filter: fmt.Sprintf(`((kind = "%s") AND (resourceUrl = "https://%s"))`, kind, dig),
+	}
+
+	var res []*grafeaspb.AttestationOccurrence
+	occs := ac.Grafeas.ListOccurrences(ctx, req)
+	for {
+		occ, err := occs.Next()
+		if errors.Is(err, iterator.Done) {
+			break
+		}
+		if err != nil {
+			return nil, err
+		}
+		switch occ.GetKind() {
+		case kind:
+			if noteRef != "" && occ.NoteName != noteRef {
+				continue
+			}
+			att := occ.GetAttestation()
+			sigs := att.GetSignatures()
+			for i, s := range sigs {
+				if err := ac.Verifier.Verify(ctx, att.SerializedPayload, s.Signature); err != nil {
+					if ac.Logger != nil {
+						ac.Logger.Info("failed to verify attestation", "img", dig.String(), "sig", i, "err", err.Error())
+					}
+					continue
+				}
+				res = append(res, att)
+			}
+		}
+	}
+
+	if res == nil {
+		return nil, ErrAttestationNotFound
+	}
+	return res, nil
+}
+
+type VerifierSigner interface {
+	Signer
+	Verifier
+}
+
+type AttestationGetter interface {
+	Get(ctx context.Context, dig name.Digest, noteRef string) ([]*grafeaspb.AttestationOccurrence, error)
+}
+
+type GrafeasAttester struct {
+	Grafeas GrafeasClient
+	Parent  string
+
+	Keys         VerifierSigner
+	Attestations AttestationGetter
+	NoteRef      string
+
+	Logger
+}
+
+func (t *GrafeasAttester) Check(ctx context.Context, dig name.Digest) (bool, error) {
+	_, err := t.Attestations.Get(ctx, dig, t.NoteRef)
+	if err != nil && !errors.Is(err, ErrAttestationNotFound) {
+		return false, err
+	}
+
+	return !errors.Is(err, ErrAttestationNotFound), nil
+}
+
+func (t *GrafeasAttester) Attest(ctx context.Context, dig name.Digest) error {
+	ok, err := t.Check(ctx, dig)
+	if err != nil {
+		return err
+	}
+
+	if ok {
+		if t.Logger != nil {
+			t.Logger.Debug("image %s already attested", "img", dig.String())
+		}
 		return nil
 	}
 
-	attestor := fmt.Sprintf("projects/%s/attestors/%s", attestorPrj, attestorName)
-
 	payload := GCPBinAuthzPayload{
-		DockerReference:      img,
-		DockerManifestDigest: imgDigestStr,
+		DockerReference:      dig.String(),
+		DockerManifestDigest: dig.DigestStr(),
 	}
 
 	payloadBytes, err := json.Marshal(payload)
 	if err != nil {
-		return nil
+		return err
 	}
 
-	ks := KMSSigner{
-		Project:  keyProject,
-		Location: keyLocation,
-		Ring:     keyRing,
-		Key:      keyName,
-		Version:  keyVersion,
-	}
-	sig, err := ks.Sign(ctx, payloadBytes)
+	sig, kid, err := t.Keys.Sign(ctx, payloadBytes)
 	if err != nil {
-		return nil
+		return err
 	}
 
-	att, err := bauthz.Projects.Attestors.Get(attestor).Do()
-	if err != nil {
-		return nil
-	}
-
-	noteRef := att.UserOwnedGrafeasNote.NoteReference
-	kid := att.UserOwnedGrafeasNote.PublicKeys[0].Id
+	// Hopefully we can just use the key name to KMS and the
+	// kid, it is the same thing with a static prefix
+	//	kid := att.UserOwnedGrafeasNote.PublicKeys[0].Id
 
 	occSig := &grafeaspb.Signature{
 		Signature:   sig,
@@ -1088,14 +1215,15 @@ func blah() error {
 	}
 
 	occReq := &grafeaspb.CreateOccurrenceRequest{
+		Parent: t.Parent,
 		Occurrence: &grafeaspb.Occurrence{
-			NoteName:    noteRef,
-			ResourceUri: img,
+			NoteName:    t.NoteRef,
+			ResourceUri: fmt.Sprintf("https://%s", dig),
 			Details:     occAtt,
 		},
 	}
 
-	_, err = grafeas.CreateOccurrence(ctx, occReq)
+	_, err = t.Grafeas.CreateOccurrence(ctx, occReq)
 
 	return err
 }

@@ -21,48 +21,44 @@ import (
 	"time"
 
 	containeranalysis "cloud.google.com/go/containeranalysis/apiv1"
+	kms "cloud.google.com/go/kms/apiv1"
 	"github.com/cerbos/reimage"
 	"github.com/google/go-containerregistry/pkg/crane"
 	"github.com/google/go-containerregistry/pkg/name"
+	"google.golang.org/api/binaryauthorization/v1"
 
 	"k8s.io/apimachinery/pkg/util/yaml"
 )
 
 type app struct {
-	Version                bool
-	MappingsOnly           bool
-	RenameIgnore           string
-	renameIgnore           *regexp.Regexp
-	RenameRemotePath       string
-	RenameTemplateString   string
-	remoteTemplate         *template.Template
-	RenameForceToDigest    bool
-	Clobber                bool
-	NoCopy                 bool
-	RulesConfigFile        string
-	imagFinder             reimage.ImagesFinder
-	DryRun                 bool
-	WriteMappings          string
-	WriteMappingsImg       string
-	StaticMappings         string
-	StaticMappingsImg      string
-	static                 *reimage.StaticRemapper
-	VulnCheckGrafeasParent string
-	VulnCheckTimeout       time.Duration
-	VulnCheckIgnoreList    []string
-	VulnCheckMaxCVSS       float64
-	VulnCheckIgnoreImages  string
-	vulnCheckIgnoreImages  *regexp.Regexp
+	Version               bool
+	MappingsOnly          bool
+	RenameIgnore          string
+	renameIgnore          *regexp.Regexp
+	RenameRemotePath      string
+	RenameTemplateString  string
+	remoteTemplate        *template.Template
+	RenameForceToDigest   bool
+	Clobber               bool
+	NoCopy                bool
+	RulesConfigFile       string
+	imagFinder            reimage.ImagesFinder
+	DryRun                bool
+	WriteMappings         string
+	WriteMappingsImg      string
+	StaticMappings        string
+	StaticMappingsImg     string
+	static                *reimage.StaticRemapper
+	GrafeasParent         string
+	VulnCheckTimeout      time.Duration
+	VulnCheckIgnoreList   []string
+	VulnCheckMaxCVSS      float64
+	VulnCheckIgnoreImages string
+	vulnCheckIgnoreImages *regexp.Regexp
 
-	AttestorProject string
-	AttestorName    string
-	SignAttestor    bool
+	BinAuthzAttestor string
 
-	GCPKMSProject    string
-	GCPKMSKey        string
-	GCPKMSKeyVersion string
-	GCPKMSLocation   string
-	GCPKMSKeyring    string
+	GCPKMSKey string
 
 	Debug bool
 
@@ -94,20 +90,16 @@ func setup() (*app, error) {
 	flag.StringVar(&a.StaticMappings, "static-json-mappings-file", "", "take all mappings from a mappings file")
 	flag.StringVar(&a.StaticMappingsImg, "static-json-mappings-img", "", "take all mapping from a mappings registry image")
 
-	flag.StringVar(&a.VulnCheckGrafeasParent, "vulncheck-grafeas-parent", "", "value for the parent of the grafeas client (e.g. \"project/my-project-id\" for GCP")
-	flag.DurationVar(&a.VulnCheckTimeout, "vuln-check-timeout", 5*time.Minute, "how long to wait for vulnerability scanning to complete")
+	flag.DurationVar(&a.VulnCheckTimeout, "vulncheck-timeout", 5*time.Minute, "how long to wait for vulnerability scanning to complete")
 	flag.StringVar(&vulnIgnoreStr, "vulncheck-ignore-cve-list", "", "comma separated list of vulnerabilities to ignore")
 	flag.Float64Var(&a.VulnCheckMaxCVSS, "vulncheck-max-cvss", 9.0, "maximum CVSS vulnerabitility score")
 	flag.StringVar(&a.VulnCheckIgnoreImages, "vulncheck-ignore-images", "", "regexp of images to skip for CVE checks")
 
-	/*
-		  -gcp-attestor-project
-			-gcp-kms-key
-		  -gcp-kms-key-version
-			-gcp-kms-location
-			-gcp-kms-keyring
-			-gcp-kms-project
-	*/
+	flag.StringVar(&a.GrafeasParent, "grafeas-parent", "", "value for the parent of the grafeas client (e.g. \"project/my-project-id\" for GCP")
+
+	flag.StringVar(&a.BinAuthzAttestor, "binauthz-attestor", "", "Google BinAuthz Attestor (e.g. projects/myproj/attestors/myattestor)")
+
+	flag.StringVar(&a.GCPKMSKey, "gcp-kms-key", "", "KMS key (e.g. projects/PROJECT/locations/LOCATION/keyRings/KEYRING/cryptoKeys/KEY/cryptoKeyVersions/V)")
 
 	flag.Parse()
 
@@ -367,7 +359,7 @@ func (a *app) checkVulns(ctx context.Context, imgs map[string]reimage.QualifiedI
 	gc := c.GetGrafeasClient()
 	checker := reimage.VulnChecker{
 		IgnoreImages:  a.vulnCheckIgnoreImages,
-		Parent:        a.VulnCheckGrafeasParent,
+		Parent:        a.GrafeasParent,
 		Grafeas:       gc,
 		MaxCVSS:       float32(a.VulnCheckMaxCVSS),
 		CVEIgnoreList: a.VulnCheckIgnoreList,
@@ -424,6 +416,96 @@ func (a *app) checkVulns(ctx context.Context, imgs map[string]reimage.QualifiedI
 
 	for k, v := range res {
 		imgs[k] = v
+	}
+
+	return errors.Join(errs...)
+}
+
+func (a *app) attestImages(ctx context.Context, imgs map[string]reimage.QualifiedImage) error {
+	if a.BinAuthzAttestor == "" {
+		return nil
+	}
+
+	if a.GCPKMSKey == "" {
+		return fmt.Errorf("attestation signing requested, but no key specified")
+	}
+
+	kc, err := kms.NewKeyManagementClient(ctx)
+	if err != nil {
+		return err
+	}
+
+	c, err := containeranalysis.NewClient(ctx)
+	if err != nil {
+		return fmt.Errorf("failed creating containeranalysis client, %w", err)
+	}
+
+	gc := c.GetGrafeasClient()
+
+	ks := &reimage.KMS{
+		Client: kc,
+		Key:    a.GCPKMSKey,
+	}
+
+	bauthz, err := binaryauthorization.NewService(ctx)
+	if err != nil {
+		return err
+	}
+
+	att, err := bauthz.Projects.Attestors.Get(a.BinAuthzAttestor).Do()
+	if err != nil {
+		return fmt.Errorf("could not retrieve attestor %s, %w", a.BinAuthzAttestor, err)
+	}
+
+	noteRef := att.UserOwnedGrafeasNote.NoteReference
+
+	ac := &reimage.GrafeasAttestationChecker{
+		Grafeas:  gc,
+		Parent:   a.GrafeasParent,
+		Verifier: ks,
+		Logger:   a.log,
+	}
+
+	th := &reimage.GrafeasAttester{
+		Grafeas:      gc,
+		Parent:       a.GrafeasParent,
+		Keys:         ks,
+		Attestations: ac,
+		NoteRef:      noteRef,
+		Logger:       a.log,
+	}
+
+	errs := make([]error, len(imgs))
+
+	wg := &sync.WaitGroup{}
+	wg.Add(len(imgs))
+
+	i := 0
+	for _, img := range imgs {
+		go func(img reimage.QualifiedImage, i int) {
+			defer wg.Done()
+
+			ref, err := name.ParseReference(img.Tag)
+			if err != nil {
+				errs[i] = fmt.Errorf("could not parse ref %q, %w", img, err)
+				return
+			}
+
+			dig := ref.Context().Registry.Repo(ref.Context().RepositoryStr()).Digest(img.Digest)
+
+			errs[i] = th.Attest(ctx, dig)
+		}(img, i)
+	}
+
+	wg.Wait()
+
+	for _, err := range errs {
+		switch {
+		case errors.Is(err, context.Canceled):
+			// if there are any context cancelled errors, we'll just return one
+			// directly
+			return err
+		}
 	}
 
 	return errors.Join(errs...)
@@ -491,6 +573,12 @@ func main() {
 	err = app.writeMappings(mappings)
 	if err != nil {
 		app.log.Error(fmt.Errorf("failed writing mappings, %w", err).Error())
+		os.Exit(1)
+	}
+
+	err = app.attestImages(ctx, mappings)
+	if err != nil {
+		app.log.Error(fmt.Errorf("failed attesting images, %w", err).Error())
 		os.Exit(1)
 	}
 }
