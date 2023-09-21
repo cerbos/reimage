@@ -8,18 +8,21 @@ import (
 	"bufio"
 	"bytes"
 	"context"
-	"crypto"
-	"crypto/rsa"
-	"crypto/sha512"
+	"crypto/ecdsa"
+	"crypto/sha256"
 	"crypto/x509"
+	"encoding/asn1"
+	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
 	"errors"
 	"fmt"
 	"hash/crc32"
 	"io"
+	"log"
 	"log/slog"
 	"math"
+	"math/big"
 	"net/http"
 	"regexp"
 	"sort"
@@ -74,6 +77,15 @@ var (
 	}
 
 	_ = mustCompile(DefaultRulesConfig)
+
+	// ErrDiscoveryNotFound is returned when no Vulnerability checking Discovery is associated with an image
+	ErrDiscoveryNotFound = errors.New("discovery not found in response")
+
+	// ErrDiscoverNotFinished is returned when Vulnerability checking did not complete in time
+	ErrDiscoverNotFinished = errors.New("vulnerability checking not completed")
+
+	// ErrAttestationNotFound is return if no attestations are present for a given image digest
+	ErrAttestationNotFound = errors.New("attestation not found in response")
 )
 
 // Logger is a subset of the slog interface
@@ -113,6 +125,8 @@ func (h *History) Add(ref name.Reference) {
 	h.Refs = append(h.Refs, ref)
 }
 
+// AddDigest sets the known image digest for the image being
+// tracked by this history
 func (h *History) AddDigest(ref name.Digest) {
 	h.DigestStr = ref.DigestStr()
 }
@@ -275,6 +289,7 @@ func needsUpdate(newRef name.Reference, old name.Digest, log Logger) (bool, erro
 	return true, nil
 }
 
+// QualifiedImage describes an image tag, at a specific digest
 type QualifiedImage struct {
 	Tag         string   `json:"tag"`
 	Digest      string   `json:"digest"`
@@ -282,11 +297,15 @@ type QualifiedImage struct {
 	FoundCVEs   []string `json:"foundCVEs,omitempty"`
 }
 
+// StaticRemapper is a Remapper implementation that allows statically mapping
+// incoming images to a pre-existing set of known target image names and digests
 type StaticRemapper struct {
 	Mappings     map[string]QualifiedImage
 	AllowMissing bool
 }
 
+// NewStaticRemapper creates a StaticRemapper. If confirmDigest is true, the constructor
+// will check that all target image tags still map to the currently referenced digest
 func NewStaticRemapper(mps map[string]QualifiedImage, confirmDigest bool) (*StaticRemapper, error) {
 	for k, v := range mps {
 		_, err := name.ParseReference(k)
@@ -314,6 +333,9 @@ func NewStaticRemapper(mps map[string]QualifiedImage, confirmDigest bool) (*Stat
 	return &StaticRemapper{Mappings: mps}, nil
 }
 
+// ReMap looks up the incoming image in the provided mappings. If AllowMissing is
+// false, attempts to look up images not in the static mappings will fail (if true,
+// ReMap is a no-op)
 func (s *StaticRemapper) ReMap(h *History) error {
 	refStr := h.Latest().String()
 	staticDetails, ok := s.Mappings[refStr]
@@ -391,7 +413,7 @@ type RecorderRemapper struct {
 	histories []*History
 }
 
-// Recorder records all remappings so far, should usuually be used as the final
+// ReMap records all remappings so far, should usuually be used as the final
 // remapper
 func (r *RecorderRemapper) ReMap(h *History) error {
 	r.histories = append(r.histories, h)
@@ -755,11 +777,14 @@ type GrafeasClient interface {
 	CreateOccurrence(ctx context.Context, req *grafeaspb.CreateOccurrenceRequest, opts ...gax.CallOption) (*grafeaspb.Occurrence, error)
 }
 
+// VulnCheckerResult tracks CVEs associated with an image, and those that
+// have been explicitly ignored at the time of processing
 type VulnCheckerResult struct {
-	Ignored map[string][]string
-	Found   map[string][]string
+	Ignored map[string][]string // CVEs that were explicitly ignored
+	Found   map[string][]string // CVEs found that were under the max allowed score
 }
 
+// AnnotateMappings adds the Ignored/Found CVE lists to the provided mappings
 func (vcr VulnCheckerResult) AnnotateMappings(mappings map[string]QualifiedImage) {
 	for img, qImg := range mappings {
 		if vcr.Ignored != nil {
@@ -772,16 +797,18 @@ func (vcr VulnCheckerResult) AnnotateMappings(mappings map[string]QualifiedImage
 	}
 }
 
-// VulnChecker checks that images have been scanned, and checks that
+// GrafeasVulnChecker checks that images have been scanned, and checks that
 // they do not contain unexpected vulnerabilities
-type VulnChecker struct {
-	IgnoreImages  *regexp.Regexp
-	Grafeas       GrafeasClient
-	Parent        string
-	MaxCVSS       float32
-	CVEIgnoreList []string
-	RetryMax      int
-	RetryDelay    time.Duration
+type GrafeasVulnChecker struct {
+	Grafeas GrafeasClient
+	Parent  string
+
+	IgnoreImages  *regexp.Regexp // do not look for CVEs in images matching this pattern
+	MaxCVSS       float32        // Maximum permitted CVSS score
+	CVEIgnoreList []string       // CVEs to explicitly ignore
+
+	RetryMax   int           // Max attempts to retrieve vulnerability discovery results
+	RetryDelay time.Duration // Max time to wait for vulnerability discovery results
 
 	Logger
 
@@ -790,9 +817,7 @@ type VulnChecker struct {
 	res          VulnCheckerResult
 }
 
-var ErrDiscoveryNotFound = errors.New("discovery not found in response")
-
-func (vc *VulnChecker) getDiscovery(ctx context.Context, dig name.Digest) (*grafeaspb.DiscoveryOccurrence, error) {
+func (vc *GrafeasVulnChecker) getDiscovery(ctx context.Context, dig name.Digest) (*grafeaspb.DiscoveryOccurrence, error) {
 	kind := grafeaspb.NoteKind_DISCOVERY
 	req := &grafeaspb.ListOccurrencesRequest{
 		Parent: vc.Parent,
@@ -818,7 +843,7 @@ func (vc *VulnChecker) getDiscovery(ctx context.Context, dig name.Digest) (*graf
 
 var errVulnerabilitiesNotFound = errors.New("vulnerability assessment not found in response")
 
-func (vc *VulnChecker) getVulnerabilities(ctx context.Context, dig name.Digest) ([]*grafeaspb.VulnerabilityOccurrence, error) {
+func (vc *GrafeasVulnChecker) getVulnerabilities(ctx context.Context, dig name.Digest) ([]*grafeaspb.VulnerabilityOccurrence, error) {
 	req := &grafeaspb.ListOccurrencesRequest{
 		Parent: vc.Parent,
 		Filter: fmt.Sprintf(`((kind = "VULNERABILITY") AND (resourceUrl = "https://%s"))`, dig),
@@ -841,10 +866,6 @@ func (vc *VulnChecker) getVulnerabilities(ctx context.Context, dig name.Digest) 
 
 	return res, nil
 }
-
-var (
-	ErrDiscoverNotFinished = errors.New("vulnerability checking not completed")
-)
 
 // ImageCheckError is returned by Check if unwanted vulnerabilities are found
 type ImageCheckError struct {
@@ -872,7 +893,7 @@ func (ice *ImageCheckError) Error() string {
 }
 
 // Check checks an individual image.
-func (vc *VulnChecker) check(ctx context.Context, dig name.Digest) (*CheckRes, error) {
+func (vc *GrafeasVulnChecker) check(ctx context.Context, dig name.Digest) (*CheckRes, error) {
 	vc.Lock()
 	if vc.cveAllowList == nil {
 		vc.cveAllowList = map[string]struct{}{}
@@ -930,12 +951,15 @@ func (vc *VulnChecker) check(ctx context.Context, dig name.Digest) (*CheckRes, e
 	return &res, nil
 }
 
+// CheckRes is the result of a vulnerability check
 type CheckRes struct {
-	Ignored []string
-	Found   []string
+	Ignored []string // CVEs that were present, but explicitly ignored by the checker
+	Found   []string // CVEs that were present, but under the max requested CVSS
 }
 
-func (vc *VulnChecker) Check(ctx context.Context, dig name.Digest) (*CheckRes, error) {
+// Check waits for a completed vulnerability discovery, and then check that an image
+// has no CVEs that violate the configured policy
+func (vc *GrafeasVulnChecker) Check(ctx context.Context, dig name.Digest) (*CheckRes, error) {
 	var err error
 	img := dig.String()
 	if vc.IgnoreImages != nil && vc.IgnoreImages.MatchString(img) {
@@ -965,23 +989,31 @@ func (vc *VulnChecker) Check(ctx context.Context, dig name.Digest) (*CheckRes, e
 	return nil, err
 }
 
+// GCPBinAuthzPayload is the mandated attestation note for
+// signing Docker/OCI images for Google's Binauthz implementation
 type GCPBinAuthzPayload struct {
+	Critical struct {
+		Identity struct {
+			DockerReference string `json:"docker-reference"`
+		} `json:"identitiy"`
+		Image struct {
+			DockerManifestDigest string `json:"docker-manifest-digest"`
+		} `json:"image"`
+		Type string `json:"type"`
+	} `json:"critical"`
+}
+
+// GCPBinAuthzConcisePayload is a convenient wrapper around GCPBinAuthzPayload
+// it with json.Marshal to a GCPBinAuthzPayload with correctly set Type
+type GCPBinAuthzConcisePayload struct {
 	DockerReference      string
 	DockerManifestDigest string
 }
 
-func (pl *GCPBinAuthzPayload) MarshalJSON() ([]byte, error) {
-	jpl := struct {
-		Critical struct {
-			Identity struct {
-				DockerReference string `json:"docker-reference"`
-			} `json:"identitiy"`
-			Image struct {
-				DockerManifestDigest string `json:"docker-manifest-digest"`
-			} `json:"image"`
-			Type string `json:"type"`
-		} `json:"critical"`
-	}{}
+// MarshalJSON marshals the provided type to JSON, but conforming
+// to the structure of a GCPBinAuthzPayload
+func (pl *GCPBinAuthzConcisePayload) MarshalJSON() ([]byte, error) {
+	jpl := GCPBinAuthzPayload{}
 
 	jpl.Critical.Identity.DockerReference = pl.DockerReference
 	jpl.Critical.Image.DockerManifestDigest = pl.DockerManifestDigest
@@ -990,39 +1022,35 @@ func (pl *GCPBinAuthzPayload) MarshalJSON() ([]byte, error) {
 	return json.Marshal(jpl)
 }
 
-/*
-kc, err := kms.NewKeyManagementClient(ctx)
-
-	if err != nil {
-		return nil, err
-	}
-*/
+// KMSClient describes all the methods we require for a Google compatible
+// signing service
 type KMSClient interface {
 	AsymmetricSign(ctx context.Context, req *kmspb.AsymmetricSignRequest, opts ...gax.CallOption) (*kmspb.AsymmetricSignResponse, error)
 	GetPublicKey(ctx context.Context, req *kmspb.GetPublicKeyRequest, opts ...gax.CallOption) (*kmspb.PublicKey, error)
 }
 
+// KMS uses Google Cloud KMS to sign and verify data. Only EC_SIGN_P256_SHA256  are supported
+// at this time
 type KMS struct {
 	Client KMSClient
 	Key    string
 }
 
+// Sign bs, returns the signature and key ID of the signing key
 func (ks *KMS) Sign(ctx context.Context, bs []byte) ([]byte, string, error) {
-	h := sha512.New()
-	h.Write(bs)
-	digest := h.Sum(nil)
+	digest := sha256.Sum256(bs)
 
 	crc32c := func(data []byte) uint32 {
 		t := crc32.MakeTable(crc32.Castagnoli)
 		return crc32.Checksum(data, t)
 
 	}
-	digestCRC32C := crc32c(h.Sum(nil))
+	digestCRC32C := crc32c(digest[:])
 
 	kcreq := &kmspb.AsymmetricSignRequest{
-		Name: ks.Key,
+		Name: strings.TrimPrefix(ks.Key, "//cloudkms.googleapis.com/v1/"),
 		Digest: &kmspb.Digest{
-			Digest: &kmspb.Digest_Sha512{Sha512: digest},
+			Digest: &kmspb.Digest_Sha256{Sha256: digest[:]},
 		},
 		DigestCrc32C: wrapperspb.Int64(int64(digestCRC32C)),
 	}
@@ -1041,16 +1069,17 @@ func (ks *KMS) Sign(ctx context.Context, bs []byte) ([]byte, string, error) {
 		return nil, "", fmt.Errorf("AsymmetricSign response corrupted in-transit")
 	}
 
-	return kcresp.Signature, kcresp.Name, nil
+	log.Printf("kms resp signature: %s", base64.StdEncoding.EncodeToString(kcresp.Signature))
+
+	return kcresp.Signature, ks.Key, nil
 }
 
-func (ks *KMS) Verify(ctx context.Context, bs []byte, sig []byte) error {
-	h := sha512.New()
-	h.Write(bs)
-	digest := h.Sum(nil)
+// Verify the sig against the data
+func (ks *KMS) Verify(ctx context.Context, bs []byte, data []byte) error {
+	digest := sha256.Sum256(bs)
 
 	kcreq := &kmspb.GetPublicKeyRequest{
-		Name: ks.Key,
+		Name: strings.TrimPrefix(ks.Key, "//cloudkms.googleapis.com/v1/"),
 	}
 
 	pk, err := ks.Client.GetPublicKey(ctx, kcreq)
@@ -1063,51 +1092,53 @@ func (ks *KMS) Verify(ctx context.Context, bs []byte, sig []byte) error {
 	if err != nil {
 		return fmt.Errorf("failed to parse public key: %w", err)
 	}
-	rsaKey, ok := publicKey.(*rsa.PublicKey)
+	key, ok := publicKey.(*ecdsa.PublicKey)
 	if !ok {
-		return fmt.Errorf("public key is not rsa")
+		return fmt.Errorf("public key is not ecdsa")
 	}
 
-	if err := rsa.VerifyPSS(rsaKey, crypto.SHA512, digest[:], sig, &rsa.PSSOptions{
-		SaltLength: len(digest),
-		Hash:       crypto.SHA512,
-	}); err != nil {
-		return fmt.Errorf("failed to verify signature, %w", err)
+	// Verify Elliptic Curve signature.
+	var parsedSig struct{ R, S *big.Int }
+	if _, err = asn1.Unmarshal(data, &parsedSig); err != nil {
+		return fmt.Errorf("asn1.Unmarshal: %w", err)
+	}
+
+	if !ecdsa.Verify(key, digest[:], parsedSig.R, parsedSig.S) {
+		return fmt.Errorf("failed to verify signature")
 	}
 
 	return nil
 }
 
-var ErrAttestationNotFound = errors.New("attestation not found in response")
-
-type Signer interface {
+// Keyer is an interface to a private key, for signing and verifying
+// blobs
+type Keyer interface {
 	Sign(ctx context.Context, bs []byte) ([]byte, string, error)
-}
-
-type Verifier interface {
 	Verify(ctx context.Context, bs []byte, sig []byte) error
 }
 
-type GrafeasAttestationChecker struct {
+// GrafeasAttester implements attestation creation and checking using Grafaes
+type GrafeasAttester struct {
 	Grafeas GrafeasClient
 	Parent  string
 
-	Verifier
+	Keys    Keyer
+	NoteRef string
 
 	Logger
 }
 
 // Get retrieves all the Attestation occurences for the given image that use the provided
 // noteRef (or all if noteRef is "")
-func (ac *GrafeasAttestationChecker) Get(ctx context.Context, dig name.Digest, noteRef string) ([]*grafeaspb.AttestationOccurrence, error) {
+func (t *GrafeasAttester) Get(ctx context.Context, dig name.Digest, noteRef string) ([]*grafeaspb.AttestationOccurrence, error) {
 	kind := grafeaspb.NoteKind_ATTESTATION
 	req := &grafeaspb.ListOccurrencesRequest{
-		Parent: ac.Parent,
+		Parent: t.Parent,
 		Filter: fmt.Sprintf(`((kind = "%s") AND (resourceUrl = "https://%s"))`, kind, dig),
 	}
 
 	var res []*grafeaspb.AttestationOccurrence
-	occs := ac.Grafeas.ListOccurrences(ctx, req)
+	occs := t.Grafeas.ListOccurrences(ctx, req)
 	for {
 		occ, err := occs.Next()
 		if errors.Is(err, iterator.Done) {
@@ -1124,9 +1155,13 @@ func (ac *GrafeasAttestationChecker) Get(ctx context.Context, dig name.Digest, n
 			att := occ.GetAttestation()
 			sigs := att.GetSignatures()
 			for i, s := range sigs {
-				if err := ac.Verifier.Verify(ctx, att.SerializedPayload, s.Signature); err != nil {
-					if ac.Logger != nil {
-						ac.Logger.Info("failed to verify attestation", "img", dig.String(), "sig", i, "err", err.Error())
+				if t.Logger != nil {
+					t.Logger.Debug("verify", "payload", att.SerializedPayload, "sig", s.Signature)
+				}
+				if err := t.Keys.Verify(ctx, att.SerializedPayload, s.Signature); err != nil {
+					if t.Logger != nil {
+						encsig := base64.StdEncoding.EncodeToString(s.Signature)
+						t.Logger.Info("failed to verify attestation", "img", dig.String(), "sig_num", i, "payload", att.SerializedPayload, "sig", encsig, "err", err.Error())
 					}
 					continue
 				}
@@ -1141,28 +1176,9 @@ func (ac *GrafeasAttestationChecker) Get(ctx context.Context, dig name.Digest, n
 	return res, nil
 }
 
-type VerifierSigner interface {
-	Signer
-	Verifier
-}
-
-type AttestationGetter interface {
-	Get(ctx context.Context, dig name.Digest, noteRef string) ([]*grafeaspb.AttestationOccurrence, error)
-}
-
-type GrafeasAttester struct {
-	Grafeas GrafeasClient
-	Parent  string
-
-	Keys         VerifierSigner
-	Attestations AttestationGetter
-	NoteRef      string
-
-	Logger
-}
-
+// Check confirms that a correctly signed attestation for NoteRef exists for the image digest
 func (t *GrafeasAttester) Check(ctx context.Context, dig name.Digest) (bool, error) {
-	_, err := t.Attestations.Get(ctx, dig, t.NoteRef)
+	_, err := t.Get(ctx, dig, t.NoteRef)
 	if err != nil && !errors.Is(err, ErrAttestationNotFound) {
 		return false, err
 	}
@@ -1170,6 +1186,7 @@ func (t *GrafeasAttester) Check(ctx context.Context, dig name.Digest) (bool, err
 	return !errors.Is(err, ErrAttestationNotFound), nil
 }
 
+// Attest creates a NoteRef attestation for digest. It will skip this if one already exist
 func (t *GrafeasAttester) Attest(ctx context.Context, dig name.Digest) error {
 	ok, err := t.Check(ctx, dig)
 	if err != nil {
@@ -1183,12 +1200,12 @@ func (t *GrafeasAttester) Attest(ctx context.Context, dig name.Digest) error {
 		return nil
 	}
 
-	payload := GCPBinAuthzPayload{
+	payload := GCPBinAuthzConcisePayload{
 		DockerReference:      dig.String(),
 		DockerManifestDigest: dig.DigestStr(),
 	}
 
-	payloadBytes, err := json.Marshal(payload)
+	payloadBytes, err := json.Marshal(&payload)
 	if err != nil {
 		return err
 	}
@@ -1197,10 +1214,6 @@ func (t *GrafeasAttester) Attest(ctx context.Context, dig name.Digest) error {
 	if err != nil {
 		return err
 	}
-
-	// Hopefully we can just use the key name to KMS and the
-	// kid, it is the same thing with a static prefix
-	//	kid := att.UserOwnedGrafeasNote.PublicKeys[0].Id
 
 	occSig := &grafeaspb.Signature{
 		Signature:   sig,

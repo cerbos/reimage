@@ -1,6 +1,7 @@
 // Copyright 2021-2023 Zenauth Ltd.
 // SPDX-License-Identifier: Apache-2.0
 
+// Package main is the main reimage binary
 package main
 
 import (
@@ -357,7 +358,7 @@ func (a *app) checkVulns(ctx context.Context, imgs map[string]reimage.QualifiedI
 	wg := &sync.WaitGroup{}
 	wg.Add(len(imgs))
 	gc := c.GetGrafeasClient()
-	checker := reimage.VulnChecker{
+	checker := reimage.GrafeasVulnChecker{
 		IgnoreImages:  a.vulnCheckIgnoreImages,
 		Parent:        a.GrafeasParent,
 		Grafeas:       gc,
@@ -426,8 +427,22 @@ func (a *app) attestImages(ctx context.Context, imgs map[string]reimage.Qualifie
 		return nil
 	}
 
+	bauthz, err := binaryauthorization.NewService(ctx)
+	if err != nil {
+		return err
+	}
+
+	att, err := bauthz.Projects.Attestors.Get(a.BinAuthzAttestor).Do()
+	if err != nil {
+		return fmt.Errorf("could not retrieve attestor %s, %w", a.BinAuthzAttestor, err)
+	}
+
+	if a.GCPKMSKey == "" && att.UserOwnedGrafeasNote != nil && len(att.UserOwnedGrafeasNote.PublicKeys) > 0 {
+		a.GCPKMSKey = att.UserOwnedGrafeasNote.PublicKeys[0].Id
+	}
+
 	if a.GCPKMSKey == "" {
-		return fmt.Errorf("attestation signing requested, but no key specified")
+		return fmt.Errorf("could not determine signing key, please use -gcp-kms-key")
 	}
 
 	kc, err := kms.NewKeyManagementClient(ctx)
@@ -447,32 +462,14 @@ func (a *app) attestImages(ctx context.Context, imgs map[string]reimage.Qualifie
 		Key:    a.GCPKMSKey,
 	}
 
-	bauthz, err := binaryauthorization.NewService(ctx)
-	if err != nil {
-		return err
-	}
-
-	att, err := bauthz.Projects.Attestors.Get(a.BinAuthzAttestor).Do()
-	if err != nil {
-		return fmt.Errorf("could not retrieve attestor %s, %w", a.BinAuthzAttestor, err)
-	}
-
 	noteRef := att.UserOwnedGrafeasNote.NoteReference
 
-	ac := &reimage.GrafeasAttestationChecker{
-		Grafeas:  gc,
-		Parent:   a.GrafeasParent,
-		Verifier: ks,
-		Logger:   a.log,
-	}
-
 	th := &reimage.GrafeasAttester{
-		Grafeas:      gc,
-		Parent:       a.GrafeasParent,
-		Keys:         ks,
-		Attestations: ac,
-		NoteRef:      noteRef,
-		Logger:       a.log,
+		Grafeas: gc,
+		Parent:  a.GrafeasParent,
+		Keys:    ks,
+		NoteRef: noteRef,
+		Logger:  a.log,
 	}
 
 	errs := make([]error, len(imgs))
