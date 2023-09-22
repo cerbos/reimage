@@ -1,4 +1,4 @@
-#Re-image
+# Re-image
 
 A tool for mass update of images for kubernetes manifests.
 
