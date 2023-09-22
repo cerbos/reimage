@@ -475,23 +475,36 @@ func (a *app) attestImages(ctx context.Context, imgs map[string]reimage.Qualifie
 	errs := make([]error, len(imgs))
 
 	wg := &sync.WaitGroup{}
-	wg.Add(len(imgs))
 
+	// dedupe the digests we will sign
+	digs := map[string]name.Digest{}
 	i := 0
 	for _, img := range imgs {
-		go func(img reimage.QualifiedImage, i int) {
+		ref, ierr := name.ParseReference(img.Tag)
+		if ierr != nil {
+			errs[i] = fmt.Errorf("could not parse ref %q, %w", img, ierr)
+			continue
+		}
+
+		dig := ref.Context().Registry.Repo(ref.Context().RepositoryStr()).Digest(img.Digest)
+		digs[dig.String()] = dig
+		i++
+	}
+	err = errors.Join(errs...)
+	if err != nil {
+		return err
+	}
+
+	i = 0
+	errs = make([]error, len(digs))
+	wg.Add(len(digs))
+	for _, dig := range digs {
+		go func(dig name.Digest, i int) {
 			defer wg.Done()
 
-			ref, err := name.ParseReference(img.Tag)
-			if err != nil {
-				errs[i] = fmt.Errorf("could not parse ref %q, %w", img, err)
-				return
-			}
-
-			dig := ref.Context().Registry.Repo(ref.Context().RepositoryStr()).Digest(img.Digest)
-
 			errs[i] = th.Attest(ctx, dig)
-		}(img, i)
+		}(dig, i)
+		i++
 	}
 
 	wg.Wait()
