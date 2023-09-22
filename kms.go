@@ -10,13 +10,12 @@ import (
 	"crypto/sha256"
 	"crypto/x509"
 	"encoding/asn1"
-	"encoding/base64"
 	"encoding/pem"
 	"fmt"
 	"hash/crc32"
-	"log"
 	"math/big"
 	"strings"
+	"sync"
 
 	"github.com/googleapis/gax-go/v2"
 
@@ -36,6 +35,10 @@ type KMSClient interface {
 type KMS struct {
 	Client KMSClient
 	Key    string
+
+	keyOnce sync.Once
+	keyErr  error
+	key     *ecdsa.PublicKey
 }
 
 // Sign bs, returns the signature and key ID of the signing key
@@ -71,41 +74,53 @@ func (ks *KMS) Sign(ctx context.Context, bs []byte) ([]byte, string, error) {
 		return nil, "", fmt.Errorf("AsymmetricSign response corrupted in-transit")
 	}
 
-	log.Printf("kms resp signature: %s", base64.StdEncoding.EncodeToString(kcresp.Signature))
-
 	return kcresp.Signature, ks.Key, nil
 }
 
-// Verify the sig against the data
-func (ks *KMS) Verify(ctx context.Context, bs []byte, data []byte) error {
-	digest := sha256.Sum256(bs)
-
+func (ks *KMS) getKey(ctx context.Context) {
 	kcreq := &kmspb.GetPublicKeyRequest{
 		Name: strings.TrimPrefix(ks.Key, "//cloudkms.googleapis.com/v1/"),
 	}
 
 	pk, err := ks.Client.GetPublicKey(ctx, kcreq)
 	if err != nil {
-		return err
+		ks.keyErr = err
+		return
 	}
 
 	block, _ := pem.Decode([]byte(pk.GetPem()))
 	publicKey, err := x509.ParsePKIXPublicKey(block.Bytes)
 	if err != nil {
-		return fmt.Errorf("failed to parse public key: %w", err)
+		err = fmt.Errorf("failed to parse public key: %w", err)
+		ks.keyErr = err
+		return
 	}
 	key, ok := publicKey.(*ecdsa.PublicKey)
 	if !ok {
-		return fmt.Errorf("public key is not ecdsa")
+		err := fmt.Errorf("public key is not ecdsa")
+		ks.keyErr = err
+		return
+	}
+	ks.key = key
+}
+
+// Verify the sig against the data
+func (ks *KMS) Verify(ctx context.Context, bs []byte, data []byte) error {
+	digest := sha256.Sum256(bs)
+
+	ks.keyOnce.Do(func() { ks.getKey(ctx) })
+	if ks.keyErr != nil {
+		return ks.keyErr
 	}
 
+	var err error
 	// Verify Elliptic Curve signature.
 	var parsedSig struct{ R, S *big.Int }
 	if _, err = asn1.Unmarshal(data, &parsedSig); err != nil {
 		return fmt.Errorf("asn1.Unmarshal: %w", err)
 	}
 
-	if !ecdsa.Verify(key, digest[:], parsedSig.R, parsedSig.S) {
+	if !ecdsa.Verify(ks.key, digest[:], parsedSig.R, parsedSig.S) {
 		return fmt.Errorf("failed to verify signature")
 	}
 
