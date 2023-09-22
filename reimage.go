@@ -49,7 +49,7 @@ var (
 	DefaultRulesConfig = []JSONImageFinderConfig{
 		{
 			Kind:       "^Prometheus$",
-			APIVersion: "^monitoring.coreos.com/v1$",
+			APIVersion: `^monitoring\.coreos\.com/v1$`,
 			ImageJSONP: []string{"$.spec.image"},
 		},
 	}
