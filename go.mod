@@ -7,12 +7,14 @@ toolchain go1.21.0
 require (
 	cloud.google.com/go/containeranalysis v0.10.1
 	cloud.google.com/go/grafeas v0.3.1
+	cloud.google.com/go/kms v1.15.2
 	github.com/AsaiYusuke/jsonpath v1.6.0
 	github.com/google/go-containerregistry v0.16.1
 	github.com/googleapis/gax-go/v2 v2.12.0
 	github.com/goreleaser/goreleaser v1.20.0
 	google.golang.org/api v0.134.0
 	google.golang.org/genproto v0.0.0-20230731193218-e0aa005b6bdf
+	google.golang.org/protobuf v1.31.0
 	k8s.io/api v0.27.4
 	k8s.io/apimachinery v0.27.4
 	k8s.io/cli-runtime v0.27.4
@@ -24,7 +26,6 @@ require (
 	cloud.google.com/go/compute v1.23.0 // indirect
 	cloud.google.com/go/compute/metadata v0.2.3 // indirect
 	cloud.google.com/go/iam v1.1.1 // indirect
-	cloud.google.com/go/kms v1.15.2 // indirect
 	cloud.google.com/go/storage v1.31.0 // indirect
 	code.gitea.io/sdk/gitea v0.15.1 // indirect
 	dario.cat/mergo v1.0.0 // indirect
@@ -243,7 +244,6 @@ require (
 	google.golang.org/genproto/googleapis/api v0.0.0-20230731193218-e0aa005b6bdf // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20230731193218-e0aa005b6bdf // indirect
 	google.golang.org/grpc v1.57.0 // indirect
-	google.golang.org/protobuf v1.31.0 // indirect
 	gopkg.in/alexcesaro/quotedprintable.v3 v3.0.0-20150716171945-2caba252f4dc // indirect
 	gopkg.in/inf.v0 v0.9.1 // indirect
 	gopkg.in/ini.v1 v1.67.0 // indirect
