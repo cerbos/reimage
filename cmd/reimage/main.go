@@ -100,7 +100,7 @@ func setup() (*app, error) {
 
 	flag.StringVar(&a.BinAuthzAttestor, "binauthz-attestor", "", "Google BinAuthz Attestor (e.g. projects/myproj/attestors/myattestor)")
 
-	flag.StringVar(&a.GCPKMSKey, "gcp-kms-key", "", "KMS key (e.g. projects/PROJECT/locations/LOCATION/keyRings/KEYRING/cryptoKeys/KEY/cryptoKeyVersions/V)")
+	flag.StringVar(&a.GCPKMSKey, "gcp-kms-key", "", "KMS key, defaults to the first key listed in the binauthz attestation (e.g. projects/PROJECT/locations/LOCATION/keyRings/KEYRING/cryptoKeys/KEY/cryptoKeyVersions/V)")
 
 	flag.Parse()
 
