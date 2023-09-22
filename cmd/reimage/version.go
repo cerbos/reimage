@@ -6,8 +6,11 @@ package main
 import "fmt"
 
 var (
-	Version   = "unknown"
-	Commit    = "dev"
+	// Version is shown when printing the binary version
+	Version = "unknown"
+	// Commit is shown when printing the binary version
+	Commit = "dev"
+	// BuildDate is shown when printing the binary version
 	BuildDate = "unknown"
 )
 

@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"net/http/httptest"
 	"net/url"
+	"regexp"
 	"strconv"
 	"strings"
 	"testing"
@@ -354,74 +355,80 @@ func newTestRegistryLogger(t *testing.T) registry.Option {
 	return registry.Logger(log.New(rtl, "", 0))
 }
 
-func TestTagRemapper(t *testing.T) {
-	s1 := httptest.NewServer(registry.New(newTestRegistryLogger(t)))
-	defer s1.Close()
-	u1, err := url.Parse(s1.URL)
+func TestRenameRemapper(t *testing.T) {
+	base := "example.com/firstrepo/test/img1"
+	tagStr := fmt.Sprintf("%s:latest", base)
+	hashStr := "abcdabcdabceabcdabcdabcdabcdabcdabcdabcdabcaacbcbfedabcaefacbaea"
+
+	digStr := fmt.Sprintf("%s@sha256:%s", base, hashStr)
+
+	tagRef, err := name.ParseReference(tagStr)
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("test borked, %v", err)
 	}
-
-	src := fmt.Sprintf("%s/test/img1", u1.Host)
-
-	// Expected values.
-	img, err := random.Image(1024, 5)
+	digRef, err := name.ParseReference(digStr)
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("test borked digest, %v", err)
 	}
-	// Load up the registry.
-	if err := crane.Push(img, src); err != nil {
-		t.Fatal(err)
-	}
+	h := NewHistory(tagRef)
+	h.AddDigest(digRef.(name.Digest))
 
-	imgHash, _ := img.Digest()
+	tmplStr := template.Must(template.New("test").Parse(`{{ .RemotePath }}/{{ .Registry}}/{{ .Repository }}:{{ .DigestHex }}`))
 
-	if err := crane.Tag(src, "latest"); err != nil {
-		t.Fatal(err)
-	}
-
-	taggedSrc := fmt.Sprintf("%s/test/img1:latest", u1.Host)
-	latestTag, _ := name.ParseReference(taggedSrc)
-
-	t.Logf("u1: %s", u1)
-	t.Logf("taggedSrc: %s", taggedSrc)
-
+	remoteStr := "secondrepo/imported"
 	tl := &testLogger{t: t}
-	tr := &TagRemapper{
-		Logger: tl,
+	rr := &RenameRemapper{
+		RemotePath: remoteStr,
+		RemoteTmpl: tmplStr,
+		Logger:     tl,
 	}
 
-	h := NewHistory(latestTag)
-	err = tr.ReMap(h)
+	exp := fmt.Sprintf("%s/%s:%s", remoteStr, base, hashStr)
+
+	err = rr.ReMap(h)
 	if err != nil {
 		t.Fatalf("remap failed, %v", err)
 	}
-	newTag := h.LatestRef()
-	t.Logf("newTag: %v", newTag)
-
-	newDig, ok := newTag.(name.Digest)
-	if !ok {
-		t.Logf("newTag was not a digest, got %T", newTag)
-	}
-
-	if newDig.DigestStr() != imgHash.String() {
-		t.Logf("latest did not remap to correct digest:\n  exp: %s\n  got: %s\n", imgHash, newDig.DigestStr())
-	}
-
-	tr.CheckOnly = true
-	h = NewHistory(latestTag)
-	err = tr.ReMap(h)
-	if err != nil {
-		t.Fatalf("checkOnly remap failed, %v", err)
-	}
-	newTag = h.LatestRef()
-
-	if newTag.String() != latestTag.String() {
-		t.Fatalf("checkOnly altered tag:\n  exp: %s\n  got: %s", latestTag, newTag)
+	newTag := h.Latest()
+	if newTag.String() != exp {
+		t.Fatalf("incorred latest tag:\n  got: %s\n  exp: %s\n", newTag.String(), exp)
 	}
 }
 
-func TestRepoRemapper(t *testing.T) {
+func TestRenameRemapper_Ignore(t *testing.T) {
+	base := "example.com/firstrepo/test/img1"
+	tagStr := fmt.Sprintf("%s:latest", base)
+
+	tagRef, err := name.ParseReference(tagStr)
+	if err != nil {
+		t.Fatalf("test borked, %v", err)
+	}
+	h := NewHistory(tagRef)
+
+	tmplStr := template.Must(template.New("test").Parse(`{{ .RemotePath }}/{{ .Registry}}/{{ .Repository }}:{{ .DigestHex }}`))
+
+	remoteStr := "secondrepo/imported"
+	tl := &testLogger{t: t}
+	rr := &RenameRemapper{
+		Ignore:     regexp.MustCompile("^example.com/firstrepo/"),
+		RemotePath: remoteStr,
+		RemoteTmpl: tmplStr,
+		Logger:     tl,
+	}
+
+	exp := tagStr
+
+	err = rr.ReMap(h)
+	if err != nil {
+		t.Fatalf("remap failed, %v", err)
+	}
+	newTag := h.Latest()
+	if newTag.String() != exp {
+		t.Fatalf("incorred latest tag:\n  got: %s\n  exp: %s\n", newTag.String(), exp)
+	}
+}
+
+func TestEnsureRemapper(t *testing.T) {
 	rl := newTestRegistryLogger(t)
 	s1 := httptest.NewServer(registry.New(rl))
 	defer s1.Close()
@@ -456,32 +463,26 @@ func TestRepoRemapper(t *testing.T) {
 	}
 
 	imgTag, _ := name.ParseReference(src)
-	imgDesc, _ := remote.Get(imgTag)
-	digTag := imgTag.Context().Registry.Repo(imgTag.Context().RepositoryStr()).Digest(imgDesc.Digest.String())
 
-	t.Logf("img digtest tag: %s", digTag)
+	dst := fmt.Sprintf("%s/imported/test/img1", u2.Host)
 
-	tmplStr := template.Must(template.New("test").Parse(`{{ .RemotePath }}/{{ .Repository }}:{{ .DigestHex }}`))
+	newTag, _ := name.ParseReference(dst)
+
+	h := NewHistory(imgTag)
+	h.Add(newTag)
 
 	tl := &testLogger{t: t}
-	rr := &RepoRemapper{
-		RemotePath: u2.Host + "/imported",
-		RemoteTmpl: tmplStr,
-		NoClobber:  false,
-		Logger:     tl,
+	er := &EnsureRemapper{
+		Logger: tl,
 	}
-
-	h := NewHistory(digTag)
-	err = rr.ReMap(h)
+	err = er.ReMap(h)
 	if err != nil {
-		t.Fatalf("remap failed, %v", err)
+		t.Fatalf("ensure remapper failed, %v", err)
 	}
-	newTag := h.LatestRef()
-	t.Logf("newTag: %v", newTag)
 
 	newImgDesc, err := remote.Get(newTag)
 	if err != nil {
-		t.Fatalf("could not get copied image, %v", err)
+		t.Fatalf("could not look up remote image, %v", err)
 	}
 
 	newDigest := newImgDesc.Digest.String()
@@ -505,7 +506,7 @@ func TestRemapUpdater(t *testing.T) {
 	for i, tt := range tests {
 		tt := tt
 		t.Run(strconv.Itoa(i), func(t *testing.T) {
-			ru := RemapUpdater{}
+			ru := RenameUpdater{}
 			err := ru.Update(tt.obj)
 			if err != nil {
 				t.Fatalf("RemapUpdater failed, %v", err)

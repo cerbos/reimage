@@ -7,7 +7,6 @@ package reimage
 import (
 	"bufio"
 	"bytes"
-	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -20,7 +19,6 @@ import (
 	"github.com/AsaiYusuke/jsonpath"
 	"github.com/google/go-containerregistry/pkg/crane"
 	"github.com/google/go-containerregistry/pkg/name"
-	"github.com/google/go-containerregistry/pkg/v1/remote"
 	"github.com/google/go-containerregistry/pkg/v1/remote/transport"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -45,6 +43,9 @@ func mustCompile(cfgs []JSONImageFinderConfig) ImagesFinder {
 var (
 	// DefaultTemplateStr is a sensible default for importing images
 	DefaultTemplateStr = `{{ .RemotePath }}/{{ .Registry }}/{{ .Repository }}:{{ .DigestHex }}`
+
+	// DefaultRulesConfig is a set of additional, non-core rules for known existing image
+	// locations
 	DefaultRulesConfig = []JSONImageFinderConfig{
 		{
 			Kind:       "^Prometheus$",
@@ -54,6 +55,15 @@ var (
 	}
 
 	_ = mustCompile(DefaultRulesConfig)
+
+	// ErrDiscoveryNotFound is returned when no Vulnerability checking Discovery is associated with an image
+	ErrDiscoveryNotFound = errors.New("discovery not found in response")
+
+	// ErrDiscoverNotFinished is returned when Vulnerability checking did not complete in time
+	ErrDiscoverNotFinished = errors.New("vulnerability checking not completed")
+
+	// ErrAttestationNotFound is return if no attestations are present for a given image digest
+	ErrAttestationNotFound = errors.New("attestation not found in response")
 )
 
 // Logger is a subset of the slog interface
@@ -65,35 +75,72 @@ type Logger interface {
 // DefaultLogger is a quick shortcut to the slog default logger
 var DefaultLogger = Logger(slog.Default())
 
-type HistoryItem struct {
-	Ref name.Reference
-	Log string
+// History is the full set of updates performed so far
+type History struct {
+	Refs      []name.Reference
+	DigestStr string
 }
 
-type History []HistoryItem
-
+// NewHistory starts a history for a given reference
 func NewHistory(ref name.Reference) *History {
-	return &History{HistoryItem{Ref: ref, Log: "original"}}
+	return &History{
+		Refs: []name.Reference{ref},
+	}
 }
 
-func (h *History) Original() HistoryItem {
-	return (*h)[0]
+// Original returns the start of the mapping history
+func (h *History) Original() name.Reference {
+	return h.Refs[0]
 }
 
-func (h *History) OriginalRef() name.Reference {
-	return h.Original().Ref
+// Latest returns the most recent history update
+func (h *History) Latest() name.Reference {
+	return h.Refs[len(h.Refs)-1]
 }
 
-func (h *History) Latest() HistoryItem {
-	return (*h)[len(*h)-1]
+// Add updates the history with a new reference mutation
+func (h *History) Add(ref name.Reference) {
+	h.Refs = append(h.Refs, ref)
 }
 
-func (h *History) LatestRef() name.Reference {
-	return h.Latest().Ref
+// AddDigest sets the known image digest for the image being
+// tracked by this history
+func (h *History) AddDigest(ref name.Digest) {
+	h.DigestStr = ref.DigestStr()
 }
 
-func (h *History) Add(ref name.Reference, log string) {
-	*h = append(*h, HistoryItem{Ref: ref, Log: log})
+// OriginalDigest looks through the history to find any previously looked
+// up Digest of the original image. If none is found it is looked
+// up and added to the history
+func (h *History) OriginalDigest() (name.Digest, error) {
+	ref := h.Original()
+	if h.DigestStr != "" {
+		return ref.Context().Registry.Repo(ref.Context().RepositoryStr()).Digest(h.DigestStr), nil
+	}
+
+	digestStr, err := crane.Digest(ref.String())
+	if err != nil {
+		return name.Digest{}, fmt.Errorf("failed reading digest for %s, %w", ref.String(), err)
+	}
+	digest := ref.Context().Registry.Repo(ref.Context().RepositoryStr()).Digest(digestStr)
+
+	h.AddDigest(digest)
+
+	return digest, nil
+}
+
+// LatestDigest constructs a digest name for the latest reference, and the
+// original digest
+func (h *History) LatestDigest() (name.Digest, error) {
+	dig, err := h.OriginalDigest()
+	if err != nil {
+		return name.Digest{}, err
+	}
+	ref := h.Latest()
+
+	digest := ref.Context().Registry.Repo(ref.Context().RepositoryStr()).Digest(dig.DigestStr())
+
+	return digest, nil
 }
 
 // A Remapper transforms OCI images references, and may perform side effects
@@ -112,19 +159,86 @@ type RepoTemplateInput struct {
 	Repository string // The image repository
 }
 
-// RepoRemapper is a Remapper implementation that copies images to
+// RenameRemapper is a Remapper implementation that can rename an image to
 // a remote registry/repository path. The new path is built using RemoteTmpl,
-// and the copy is performed using crane.Copy.
-type RepoRemapper struct {
+// and the copy is performed using crane.Copy. reimage will then optionally
+// copy the image to the new locatio
+type RenameRemapper struct {
+	Ignore     *regexp.Regexp
 	RemotePath string             // used for the .RemotePath value in the template
 	RemoteTmpl *template.Template // template to build the final image string
-	NoClobber  bool               // If true, we'll refuse to overwrite remote images
-	DryRun     bool               // If true, don't perform the any actual copies
 
+	history map[string]string // track existing remaps so that we one ever do 1 to 1
 	Logger
 }
 
-func needsUpdate(ctx context.Context, newRef name.Reference, old name.Digest, log Logger) (bool, error) {
+// ReMap copies an image from the original registry to
+// a given new destination registry
+func (t *RenameRemapper) ReMap(h *History) error {
+	var err error
+	ref := h.Latest()
+	refCtx := ref.Context()
+
+	img := ref.String()
+	if img == "" || (t.Ignore != nil && t.Ignore.MatchString(img)) {
+		return nil
+	}
+
+	digest, err := h.OriginalDigest()
+	if err != nil {
+		return fmt.Errorf("repo-remapper failed to look up original digest, %w", err)
+	}
+
+	tagStr := ""
+	switch r := ref.(type) {
+	case name.Digest:
+		digest = r
+	case name.Tag:
+		tagStr = r.TagStr()
+	default:
+	}
+
+	digestStr := digest.DigestStr()
+	digestAlgo, digestHex, _ := strings.Cut(digestStr, ":")
+
+	input := RepoTemplateInput{
+		RemotePath: t.RemotePath,
+		Repository: refCtx.RepositoryStr(),
+		Registry:   refCtx.Registry.String(),
+		Digest:     digestStr,
+		DigestAlgo: digestAlgo,
+		DigestHex:  digestHex,
+		Tag:        tagStr,
+	}
+
+	newName := bytes.NewBufferString("")
+
+	err = t.RemoteTmpl.Execute(newName, input)
+	if err != nil {
+		return err
+	}
+
+	newRef, err := name.ParseReference(newName.String())
+	if err != nil {
+		return err
+	}
+
+	if t.history == nil {
+		t.history = map[string]string{}
+	}
+
+	origStr := h.Original().String()
+	if existing, ok := t.history[origStr]; ok && existing != newRef.String() {
+		return fmt.Errorf("template remapping must be one to one, cannot map %s to %s aswell as %s", origStr, existing, newRef)
+	}
+
+	t.history[origStr] = newRef.String()
+	h.Add(newRef)
+
+	return nil
+}
+
+func needsUpdate(newRef name.Reference, old name.Digest, log Logger) (bool, error) {
 	digest, err := crane.Digest(newRef.String())
 
 	var terr *transport.Error
@@ -153,52 +267,88 @@ func needsUpdate(ctx context.Context, newRef name.Reference, old name.Digest, lo
 	return true, nil
 }
 
-// ReMap copies an image from the original registry to
-// a given new destination registry
-func (t *RepoRemapper) ReMap(h *History) error {
-	ctx := context.TODO()
-	var err error
-	ref := h.LatestRef()
-	refCtx := ref.Context()
+// QualifiedImage describes an image tag, at a specific digest
+type QualifiedImage struct {
+	Tag         string   `json:"tag"`
+	Digest      string   `json:"digest"`
+	IgnoredCVEs []string `json:"ignoredCVEs,omitempty"`
+	FoundCVEs   []string `json:"foundCVEs,omitempty"`
+}
 
-	var digest name.Digest
-	digestStr, digestAlgo, digestHex := "", "", ""
-	tagStr := ""
-	switch r := ref.(type) {
-	case name.Digest:
-		digest = r
-		digestStr = r.DigestStr()
-		digestAlgo, digestHex, _ = strings.Cut(digestStr, ":")
-	case name.Tag:
-		tagStr = r.TagStr()
-	default:
+// StaticRemapper is a Remapper implementation that allows statically mapping
+// incoming images to a pre-existing set of known target image names and digests
+type StaticRemapper struct {
+	Mappings     map[string]QualifiedImage
+	AllowMissing bool
+}
+
+// NewStaticRemapper creates a StaticRemapper. If confirmDigest is true, the constructor
+// will check that all target image tags still map to the currently referenced digest
+func NewStaticRemapper(mps map[string]QualifiedImage, confirmDigest bool) (*StaticRemapper, error) {
+	for k, v := range mps {
+		_, err := name.ParseReference(k)
+		if err != nil {
+			return nil, fmt.Errorf("could not parse mapping key %s, %w", k, err)
+		}
+
+		_, err = name.ParseReference(v.Tag)
+		if err != nil {
+			return nil, fmt.Errorf("could not parse mapping value %s, %w", v.Tag, err)
+		}
+
+		if !confirmDigest {
+			continue
+		}
+		dig, err := crane.Digest(v.Tag)
+		if err != nil {
+			return nil, fmt.Errorf("could not check digest for %s, %w", v.Tag, err)
+		}
+		if dig != v.Digest {
+			return nil, fmt.Errorf("mapping for %s has changed, was %s, is now %s", v.Tag, v.Digest, dig)
+		}
 	}
 
-	input := RepoTemplateInput{
-		RemotePath: t.RemotePath,
-		Repository: refCtx.RepositoryStr(),
-		Registry:   refCtx.Registry.String(),
-		Digest:     digestStr,
-		DigestAlgo: digestAlgo,
-		DigestHex:  digestHex,
-		Tag:        tagStr,
+	return &StaticRemapper{Mappings: mps}, nil
+}
+
+// ReMap looks up the incoming image in the provided mappings. If AllowMissing is
+// false, attempts to look up images not in the static mappings will fail (if true,
+// ReMap is a no-op)
+func (s *StaticRemapper) ReMap(h *History) error {
+	refStr := h.Latest().String()
+	staticDetails, ok := s.Mappings[refStr]
+	if !ok {
+		if s.AllowMissing {
+			return nil
+		}
+		return fmt.Errorf("no known static reference for %s", refStr)
 	}
+	newRef, _ := name.ParseReference(staticDetails.Tag)
+	h.Add(newRef)
+	digRef := newRef.Context().Registry.Repo(newRef.Context().RepositoryStr()).Digest(staticDetails.Digest)
+	h.AddDigest(digRef)
+	return nil
+}
 
-	newName := bytes.NewBufferString("")
+// EnsureRemapper is a mapper that will copy the original image reference
+// to the latest, possibly remote, reference
+type EnsureRemapper struct {
+	NoClobber bool // If true, we'll refuse to overwrite remote images
+	DryRun    bool // If true, don't perform the any actual copies
 
-	err = t.RemoteTmpl.Execute(newName, input)
+	Logger
+}
+
+// ReMap copies the original reference to the latest, potentially remote reference
+func (t *EnsureRemapper) ReMap(h *History) error {
+	srcRef := h.Original()
+	newRef := h.Latest()
+	digest, err := h.OriginalDigest()
 	if err != nil {
-		return err
+		return fmt.Errorf("ensure remapper failed to look up the digest, %w", err)
 	}
 
-	newRef, err := name.ParseReference(newName.String())
-	if err != nil {
-		return err
-	}
-
-	h.Add(newRef, "remapped to new repo")
-
-	update, err := needsUpdate(ctx, newRef, digest, t)
+	update, err := needsUpdate(newRef, digest, t)
 	if err != nil {
 		return err
 	}
@@ -206,41 +356,15 @@ func (t *RepoRemapper) ReMap(h *History) error {
 	if update {
 		if t.DryRun {
 			if t.Logger != nil {
-				t.Info("dry-run, skipping copy", slog.String("src", ref.String()), slog.String("dst", newRef.String()))
+				t.Info("dry-run, skipping copy", slog.String("src", srcRef.String()), slog.String("dst", newRef.String()))
 			}
 			return nil
 		}
-		err = crane.Copy(ref.String(), newRef.String(), crane.WithNoClobber(t.NoClobber))
+		err = crane.Copy(srcRef.String(), newRef.String(), crane.WithNoClobber(t.NoClobber))
 		if err != nil {
 			return err
 		}
 	}
-
-	return nil
-}
-
-// TagRemapper looks up the remote image and translates it to the current digest form
-type TagRemapper struct {
-	CheckOnly bool // CheckOnly will ensure the remote image exists, but will leave it unchanged
-
-	Logger
-}
-
-// ReMap looks up the remote image and translates it to the current digest form
-func (t *TagRemapper) ReMap(h *History) error {
-	ref := h.LatestRef()
-	desc, err := remote.Get(ref)
-	if err != nil {
-		return err
-	}
-
-	if t.CheckOnly {
-		return nil
-	}
-
-	digestStr := desc.Digest.String()
-	tag := ref.Context().Registry.Repo(ref.Context().RepositoryStr()).Digest(digestStr)
-	h.Add(tag, fmt.Sprintf("tag %s remapped to digest %s", ref.String(), digestStr))
 
 	return nil
 }
@@ -262,6 +386,43 @@ func (t MultiRemapper) ReMap(h *History) error {
 	return nil
 }
 
+// RecorderRemapper records all remappings up as they are seen
+type RecorderRemapper struct {
+	histories []*History
+}
+
+// ReMap records all remappings so far, should usuually be used as the final
+// remapper
+func (r *RecorderRemapper) ReMap(h *History) error {
+	r.histories = append(r.histories, h)
+	return nil
+}
+
+// Mappings returns the set of image original to final performed by
+// all the remappers
+func (r *RecorderRemapper) Mappings() (map[string]QualifiedImage, error) {
+	res := map[string]QualifiedImage{}
+
+	for _, h := range r.histories {
+		org := h.Original()
+		last := h.Latest()
+		lastDig, err := h.OriginalDigest()
+		if err != nil {
+			return nil, fmt.Errorf("failed to record digest, %w", err)
+		}
+		lastImg := QualifiedImage{
+			Tag:    last.String(),
+			Digest: lastDig.DigestStr(),
+		}
+		if foundStr, ok := res[org.String()]; ok && ((foundStr.Tag != lastImg.Tag) || (foundStr.Digest != lastImg.Digest)) {
+			return nil, fmt.Errorf("remapping must be one to one, cannot map %s to %s aswell as %s", org, foundStr.Digest, lastImg.Digest)
+		}
+		res[org.String()] = lastImg
+	}
+
+	return res, nil
+}
+
 // ImagesFinder specifies any mechanism for finding images within any
 // k8s Unstructured data. Each entry in the map is an image name that was
 // found. Calling the Set method on the map values will replace the discovered
@@ -270,19 +431,16 @@ type ImagesFinder interface {
 	FindImages(obj *unstructured.Unstructured) (map[string]ImageSetters, error)
 }
 
-// RemapUpdater applies the Remapper to all images found in object passed to Update.
+// RenameUpdater applies the Remapper to all images found in object passed to Update.
 // For Objects of unknown types the UnstructuredImagesFinder is used.
 // TODO(tcm): rename this thinger.
-type RemapUpdater struct {
-	Ignore                   *regexp.Regexp
+type RenameUpdater struct {
 	UnstructuredImagesFinder ImagesFinder
 	Remapper                 Remapper
+	ForceDigests             bool
 }
 
-func (s *RemapUpdater) remapImageString(img string) (string, error) {
-	if img == "" || s.Ignore.MatchString(img) {
-		return img, nil
-	}
+func (s *RenameUpdater) remapImageString(img string) (string, error) {
 	ref, err := name.ParseReference(img)
 	if err != nil {
 		return "", fmt.Errorf("could not parse image ref %s, %w", img, err)
@@ -292,13 +450,22 @@ func (s *RemapUpdater) remapImageString(img string) (string, error) {
 
 	err = s.Remapper.ReMap(h)
 	if err != nil {
-		return "", fmt.Errorf("could not remap image %s, %w", img, err)
+		return "", fmt.Errorf("could not rename image %s, %w", img, err)
 	}
 
-	return h.LatestRef().String(), nil
+	if !s.ForceDigests {
+		return h.Latest().String(), nil
+	}
+
+	dig, err := h.LatestDigest()
+	if err != nil {
+		return "", fmt.Errorf("could not rename %s to digest, %w", img, err)
+	}
+
+	return dig.String(), nil
 }
 
-func (s *RemapUpdater) processContainers(cnts []corev1.Container) error {
+func (s *RenameUpdater) processContainers(cnts []corev1.Container) error {
 	for i, c := range cnts {
 		newImg, err := s.remapImageString(c.Image)
 		if err != nil {
@@ -312,7 +479,7 @@ func (s *RemapUpdater) processContainers(cnts []corev1.Container) error {
 	return nil
 }
 
-func (s *RemapUpdater) processPodSpec(spec *corev1.PodSpec) error {
+func (s *RenameUpdater) processPodSpec(spec *corev1.PodSpec) error {
 	var err error
 	err = s.processContainers(spec.Containers)
 	if err != nil {
@@ -326,7 +493,7 @@ func (s *RemapUpdater) processPodSpec(spec *corev1.PodSpec) error {
 }
 
 // Update applies the Remapper to all found images in the object
-func (s *RemapUpdater) Update(obj runtime.Object) error {
+func (s *RenameUpdater) Update(obj runtime.Object) error {
 	switch t := obj.(type) {
 	case *corev1.Pod:
 		return s.processPodSpec(&t.Spec)
