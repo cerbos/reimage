@@ -93,7 +93,7 @@ func setup() (*app, error) {
 
 	flag.DurationVar(&a.VulnCheckTimeout, "vulncheck-timeout", 5*time.Minute, "how long to wait for vulnerability scanning to complete")
 	flag.StringVar(&vulnIgnoreStr, "vulncheck-ignore-cve-list", "", "comma separated list of vulnerabilities to ignore")
-	flag.Float64Var(&a.VulnCheckMaxCVSS, "vulncheck-max-cvss", 9.0, "maximum CVSS vulnerabitility score")
+	flag.Float64Var(&a.VulnCheckMaxCVSS, "vulncheck-max-cvss", 0.0, "maximum CVSS vulnerabitility score")
 	flag.StringVar(&a.VulnCheckIgnoreImages, "vulncheck-ignore-images", "", "regexp of images to skip for CVE checks")
 
 	flag.StringVar(&a.GrafeasParent, "grafeas-parent", "", "value for the parent of the grafeas client (e.g. \"project/my-project-id\" for GCP")
@@ -348,6 +348,11 @@ func (a *app) buildRemapper(checkDigests bool) (reimage.Remapper, *reimage.Recor
 
 // checkVulns most of this should move into the main package
 func (a *app) checkVulns(ctx context.Context, imgs map[string]reimage.QualifiedImage) error {
+	if a.VulnCheckMaxCVSS == 0 {
+		a.log.Info("skipping vulnerability checks (max CVSS is set to 0)")
+		return nil
+	}
+
 	c, err := containeranalysis.NewClient(ctx)
 	if err != nil {
 		return fmt.Errorf("failed creating containeranalysis client, %w", err)
