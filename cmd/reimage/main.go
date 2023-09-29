@@ -76,7 +76,7 @@ func setup() (*app, error) {
 
 	flag.StringVar(&a.RulesConfigFile, "rules-config", "", "yaml definition of kind/image-path mappings")
 
-	flag.BoolVar(&a.MappingsOnly, "mappings-only", false, "skip yaml processing, and image copying,  and just run checks and attestations from images in mappings")
+	flag.BoolVar(&a.MappingsOnly, "mappings-only", false, "skip yaml processing, run copying, checks and attestations on all images in the static mappings")
 
 	flag.StringVar(&a.RenameIgnore, "rename-ignore", "^$", "ignore images matching this expression")
 	flag.StringVar(&a.RenameRemotePath, "rename-remote-path", "", "template for remapping imported images")

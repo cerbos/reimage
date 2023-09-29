@@ -94,7 +94,7 @@ $ helm template \
   -remote-path example.com/registry/imported
 ```
 
-The `-mappings-only` switches off the default image processing, and instead will apply
+The `-mappings-only` switches off the default yaml processing, and instead will apply
 any requested copying, vulnerability checking, and attestation against every image
 listed in the mappings file.
 
