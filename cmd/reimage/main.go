@@ -52,6 +52,7 @@ type app struct {
 	static                *reimage.StaticRemapper
 	GrafeasParent         string
 	VulnCheckTimeout      time.Duration
+	VulnCheckMaxRetries   int
 	VulnCheckIgnoreList   []string
 	VulnCheckMaxCVSS      float64
 	VulnCheckIgnoreImages string
@@ -91,7 +92,8 @@ func setup() (*app, error) {
 	flag.StringVar(&a.StaticMappings, "static-json-mappings-file", "", "take all mappings from a mappings file")
 	flag.StringVar(&a.StaticMappingsImg, "static-json-mappings-img", "", "take all mapping from a mappings registry image")
 
-	flag.DurationVar(&a.VulnCheckTimeout, "vulncheck-timeout", 5*time.Minute, "how long to wait for vulnerability scanning to complete")
+	flag.DurationVar(&a.VulnCheckTimeout, "vulncheck-timeout", 10*time.Minute, "how long to wait for vulnerability scanning to complete")
+	flag.IntVar(&a.VulnCheckMaxRetries, "vulncheck-max-retries", 20, "max number of attempts to check for vulnerabilitie")
 	flag.StringVar(&vulnIgnoreStr, "vulncheck-ignore-cve-list", "", "comma separated list of vulnerabilities to ignore")
 	flag.Float64Var(&a.VulnCheckMaxCVSS, "vulncheck-max-cvss", 0.0, "maximum CVSS vulnerabitility score")
 	flag.StringVar(&a.VulnCheckIgnoreImages, "vulncheck-ignore-images", "", "regexp of images to skip for CVE checks")
@@ -369,6 +371,8 @@ func (a *app) checkVulns(ctx context.Context, imgs map[string]reimage.QualifiedI
 		Grafeas:       gc,
 		MaxCVSS:       float32(a.VulnCheckMaxCVSS),
 		CVEIgnoreList: a.VulnCheckIgnoreList,
+		RetryMax:      a.VulnCheckMaxRetries,
+		RetryDelay:    a.VulnCheckTimeout,
 
 		Logger: a.log,
 	}

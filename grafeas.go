@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"math"
 	"regexp"
 	"sort"
@@ -237,6 +238,11 @@ func (vc *GrafeasVulnChecker) Check(ctx context.Context, dig name.Digest) (*Chec
 
 		secRetry := math.Pow(2, float64(i))
 		delay := time.Duration(secRetry) * baseDelay
+
+		if vc.Logger != nil {
+			vc.Logger.Info("retrying discovery due to error", slog.String("img", img), slog.Duration("delay", delay), slog.String("err", err.Error()))
+		}
+
 		time.Sleep(delay)
 	}
 
