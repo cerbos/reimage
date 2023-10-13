@@ -462,7 +462,7 @@ func (s *RenameUpdater) remapImageString(img string) (string, error) {
 		return "", fmt.Errorf("could not rename %s to digest, %w", img, err)
 	}
 
-	return dig.DigestStr(), nil
+	return dig.String(), nil
 }
 
 func (s *RenameUpdater) processContainers(cnts []corev1.Container) error {
