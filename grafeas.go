@@ -222,9 +222,6 @@ func (vc *GrafeasVulnChecker) Check(ctx context.Context, dig name.Digest) (*Chec
 	}
 
 	baseDelay := 500 * time.Millisecond
-	if vc.RetryDelay != 0 {
-		baseDelay = vc.RetryDelay
-	}
 	for i := 0; i <= vc.RetryMax; i++ {
 		var res *CheckRes
 		res, err = vc.check(ctx, dig)
