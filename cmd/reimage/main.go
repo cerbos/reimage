@@ -34,6 +34,8 @@ import (
 type app struct {
 	Version               bool
 	MappingsOnly          bool
+	Ignore                string
+	ignore                *regexp.Regexp
 	RenameIgnore          string
 	renameIgnore          *regexp.Regexp
 	RenameRemotePath      string
@@ -79,7 +81,9 @@ func setup() (*app, error) {
 
 	flag.BoolVar(&a.MappingsOnly, "mappings-only", false, "skip yaml processing, run copying, checks and attestations on all images in the static mappings")
 
-	flag.StringVar(&a.RenameIgnore, "rename-ignore", "^$", "ignore images matching this expression")
+	flag.StringVar(&a.Ignore, "ignore", "", "completely ignore images matching this expression")
+
+	flag.StringVar(&a.RenameIgnore, "rename-ignore", "^$", "do not rename images matching this expression (may still be converted to digest form")
 	flag.StringVar(&a.RenameRemotePath, "rename-remote-path", "", "template for remapping imported images")
 	flag.StringVar(&a.RenameTemplateString, "rename-template", reimage.DefaultTemplateStr, "template for remapping imported images")
 	flag.BoolVar(&a.RenameForceToDigest, "rename-force-digest", false, "the final renamed image will be transformed to digest form before output")
@@ -121,6 +125,10 @@ func setup() (*app, error) {
 
 	log := a.setupLog()
 	a.log = log
+
+	if a.Ignore != "" {
+		a.ignore = regexp.MustCompile(a.Ignore)
+	}
 
 	if a.RenameIgnore != "" {
 		a.renameIgnore = regexp.MustCompile(a.RenameIgnore)
@@ -311,6 +319,10 @@ func (a *app) setupLog() *slog.Logger {
 func (a *app) buildRemapper(checkDigests bool) (reimage.Remapper, *reimage.RecorderRemapper, error) {
 	var err error
 	rm := reimage.MultiRemapper{}
+
+	if a.ignore != nil {
+		rm = append(rm, &reimage.IgnoreRemapper{Ignore: a.ignore})
+	}
 
 	a.static, err = a.readStaticMappings(checkDigests)
 	if err != nil {
@@ -549,6 +561,7 @@ func main() {
 
 	if !app.MappingsOnly {
 		s := &reimage.RenameUpdater{
+			Ignore:                   app.ignore,
 			Remapper:                 rm,
 			UnstructuredImagesFinder: app.imagFinder,
 			ForceDigests:             app.RenameForceToDigest,
@@ -559,15 +572,20 @@ func main() {
 			app.log.Error(fmt.Errorf("failed processing input, %w", err).Error())
 			os.Exit(1)
 		}
-
 	} else {
 		// we run this through the remapper so that we'll still copy images
 		// if requested
 		for k := range app.static.Mappings {
+			if app.ignore != nil && app.ignore.MatchString(k) {
+				continue
+			}
 			// ref was already parsed during loading of mappings
 			ref, _ := name.ParseReference(k)
 			h := reimage.NewHistory(ref)
 			err = rm.ReMap(h)
+			if errors.Is(err, reimage.ErrSkip) {
+				continue
+			}
 			if err != nil {
 				app.log.Error(fmt.Errorf("failed processing input, %w", err).Error())
 				os.Exit(1)

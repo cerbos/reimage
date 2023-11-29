@@ -369,6 +369,20 @@ func (t *EnsureRemapper) ReMap(h *History) error {
 	return nil
 }
 
+var ErrSkip = errors.New("skip further processing")
+
+type IgnoreRemapper struct {
+	Ignore *regexp.Regexp
+}
+
+func (t *IgnoreRemapper) ReMap(h *History) error {
+	name := h.Latest().Name()
+	if t.Ignore != nil && t.Ignore.MatchString(name) {
+		return ErrSkip
+	}
+	return nil
+}
+
 // MultiRemapper applies each remapper, passing results from one to the next.
 type MultiRemapper []Remapper
 
@@ -435,12 +449,17 @@ type ImagesFinder interface {
 // For Objects of unknown types the UnstructuredImagesFinder is used.
 // TODO(tcm): rename this thinger.
 type RenameUpdater struct {
+	Ignore                   *regexp.Regexp // Completely ignore images strings matching this regexp
 	UnstructuredImagesFinder ImagesFinder
 	Remapper                 Remapper
 	ForceDigests             bool
 }
 
 func (s *RenameUpdater) remapImageString(img string) (string, error) {
+	if s.Ignore != nil && s.Ignore.MatchString(img) {
+		return img, nil
+	}
+
 	ref, err := name.ParseReference(img)
 	if err != nil {
 		return "", fmt.Errorf("could not parse image ref %s, %w", img, err)
@@ -449,6 +468,9 @@ func (s *RenameUpdater) remapImageString(img string) (string, error) {
 	h := NewHistory(ref)
 
 	err = s.Remapper.ReMap(h)
+	if errors.Is(ErrSkip, err) {
+		return img, nil
+	}
 	if err != nil {
 		return "", fmt.Errorf("could not rename image %s, %w", img, err)
 	}
