@@ -7,6 +7,7 @@ package reimage
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -14,6 +15,7 @@ import (
 	"net/http"
 	"regexp"
 	"strings"
+	"sync"
 	"text/template"
 
 	"github.com/AsaiYusuke/jsonpath"
@@ -769,4 +771,35 @@ func CompileJSONImageFinders(jmCfgs []JSONImageFinderConfig) (ImagesFinder, erro
 		jms = append(jms, jm)
 	}
 	return jms, nil
+}
+
+// VulnChecker checks that images have been scanned, and checks that
+// they do not contain unexpected vulnerabilities
+type VulnChecker struct {
+	IgnoreImages  *regexp.Regexp // do not look for CVEs in images matching this pattern
+	MaxCVSS       float32        // Maximum permitted CVSS score
+	CVEIgnoreList []string       // CVEs to explicitly ignore
+
+	Logger
+
+	sync.Mutex
+	cveAllowList map[string]struct{}
+}
+
+// CheckRes is the result of a vulnerability check
+type CheckRes struct {
+	Ignored []string // CVEs that were present, but explicitly ignored by the checker
+	Found   []string // CVEs that were present, but under the max requested CVSS
+}
+
+// Check waits for a completed vulnerability discovery, and then check that an image
+// has no CVEs that violate the configured policy
+func (vc *VulnChecker) Check(ctx context.Context, dig name.Digest) (*CheckRes, error) {
+	var err error
+	img := dig.String()
+	if vc.IgnoreImages != nil && vc.IgnoreImages.MatchString(img) {
+		return &CheckRes{}, nil
+	}
+
+	return nil, err
 }

@@ -32,26 +32,6 @@ type GrafeasClient interface {
 	CreateOccurrence(ctx context.Context, req *grafeaspb.CreateOccurrenceRequest, opts ...gax.CallOption) (*grafeaspb.Occurrence, error)
 }
 
-// VulnCheckerResult tracks CVEs associated with an image, and those that
-// have been explicitly ignored at the time of processing
-type VulnCheckerResult struct {
-	Ignored map[string][]string // CVEs that were explicitly ignored
-	Found   map[string][]string // CVEs found that were under the max allowed score
-}
-
-// AnnotateMappings adds the Ignored/Found CVE lists to the provided mappings
-func (vcr VulnCheckerResult) AnnotateMappings(mappings map[string]QualifiedImage) {
-	for img, qImg := range mappings {
-		if vcr.Ignored != nil {
-			qImg.IgnoredCVEs = vcr.Ignored[img]
-		}
-		if vcr.Found != nil {
-			qImg.FoundCVEs = vcr.Found[img]
-		}
-		mappings[img] = qImg
-	}
-}
-
 // GrafeasVulnChecker checks that images have been scanned, and checks that
 // they do not contain unexpected vulnerabilities
 type GrafeasVulnChecker struct {
@@ -69,7 +49,6 @@ type GrafeasVulnChecker struct {
 
 	sync.Mutex
 	cveAllowList map[string]struct{}
-	res          VulnCheckerResult
 }
 
 func (vc *GrafeasVulnChecker) getDiscovery(ctx context.Context, dig name.Digest) (*grafeaspb.DiscoveryOccurrence, error) {
@@ -204,12 +183,6 @@ func (vc *GrafeasVulnChecker) check(ctx context.Context, dig name.Digest) (*Chec
 	}
 
 	return &res, nil
-}
-
-// CheckRes is the result of a vulnerability check
-type CheckRes struct {
-	Ignored []string // CVEs that were present, but explicitly ignored by the checker
-	Found   []string // CVEs that were present, but under the max requested CVSS
 }
 
 // Check waits for a completed vulnerability discovery, and then check that an image

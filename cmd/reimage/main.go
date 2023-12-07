@@ -379,12 +379,13 @@ func (a *app) checkVulns(ctx context.Context, imgs map[string]reimage.QualifiedI
 	gc := c.GetGrafeasClient()
 	checker := reimage.GrafeasVulnChecker{
 		IgnoreImages:  a.vulnCheckIgnoreImages,
-		Parent:        a.GrafeasParent,
-		Grafeas:       gc,
 		MaxCVSS:       float32(a.VulnCheckMaxCVSS),
 		CVEIgnoreList: a.VulnCheckIgnoreList,
-		RetryMax:      a.VulnCheckMaxRetries,
-		RetryDelay:    a.VulnCheckTimeout,
+
+		Parent:     a.GrafeasParent,
+		Grafeas:    gc,
+		RetryMax:   a.VulnCheckMaxRetries,
+		RetryDelay: a.VulnCheckTimeout,
 
 		Logger: a.log,
 	}
