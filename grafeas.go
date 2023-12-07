@@ -12,10 +12,6 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
-	"regexp"
-	"sort"
-	"strings"
-	"sync"
 	"time"
 
 	grafeas "cloud.google.com/go/grafeas/apiv1"
@@ -32,26 +28,18 @@ type GrafeasClient interface {
 	CreateOccurrence(ctx context.Context, req *grafeaspb.CreateOccurrenceRequest, opts ...gax.CallOption) (*grafeaspb.Occurrence, error)
 }
 
-// GrafeasVulnChecker checks that images have been scanned, and checks that
+// GrafeasVulnGetter checks that images have been scanned, and checks that
 // they do not contain unexpected vulnerabilities
-type GrafeasVulnChecker struct {
-	Grafeas GrafeasClient
-	Parent  string
-
-	IgnoreImages  *regexp.Regexp // do not look for CVEs in images matching this pattern
-	MaxCVSS       float32        // Maximum permitted CVSS score
-	CVEIgnoreList []string       // CVEs to explicitly ignore
-
+type GrafeasVulnGetter struct {
+	Grafeas    GrafeasClient
+	Parent     string
 	RetryMax   int           // Max attempts to retrieve vulnerability discovery results
 	RetryDelay time.Duration // Max time to wait for vulnerability discovery results
 
 	Logger
-
-	sync.Mutex
-	cveAllowList map[string]struct{}
 }
 
-func (vc *GrafeasVulnChecker) getDiscovery(ctx context.Context, dig name.Digest) (*grafeaspb.DiscoveryOccurrence, error) {
+func (vc *GrafeasVulnGetter) getDiscovery(ctx context.Context, dig name.Digest) (*grafeaspb.DiscoveryOccurrence, error) {
 	kind := grafeaspb.NoteKind_DISCOVERY
 	req := &grafeaspb.ListOccurrencesRequest{
 		Parent: vc.Parent,
@@ -77,7 +65,7 @@ func (vc *GrafeasVulnChecker) getDiscovery(ctx context.Context, dig name.Digest)
 
 var errVulnerabilitiesNotFound = errors.New("vulnerability assessment not found in response")
 
-func (vc *GrafeasVulnChecker) getVulnerabilities(ctx context.Context, dig name.Digest) ([]*grafeaspb.VulnerabilityOccurrence, error) {
+func (vc *GrafeasVulnGetter) getVulnerabilities(ctx context.Context, dig name.Digest) ([]*grafeaspb.VulnerabilityOccurrence, error) {
 	req := &grafeaspb.ListOccurrencesRequest{
 		Parent: vc.Parent,
 		Filter: fmt.Sprintf(`((kind = "VULNERABILITY") AND (resourceUrl = "https://%s"))`, dig),
@@ -101,58 +89,18 @@ func (vc *GrafeasVulnChecker) getVulnerabilities(ctx context.Context, dig name.D
 	return res, nil
 }
 
-// ImageCheckError is returned by Check if unwanted vulnerabilities are found
-type ImageCheckError struct {
-	Image   string
-	MaxCVSS float32
-	CVEs    map[string]float32
-}
-
-func (ice *ImageCheckError) Error() string {
-	cvsStrs := []string{}
-	for cve, score := range ice.CVEs {
-		cvsStrs = append(cvsStrs, fmt.Sprintf("%s(%.2f)", cve, score))
-	}
-	sort.Strings(cvsStrs)
-
-	str := fmt.Sprintf(
-		"image %s has %d CVEs with score > %.2f: %s",
-		ice.Image,
-		len(ice.CVEs),
-		ice.MaxCVSS,
-		strings.Join(cvsStrs, ","),
-	)
-
-	return str
-}
-
 // Check checks an individual image.
-func (vc *GrafeasVulnChecker) check(ctx context.Context, dig name.Digest) (*CheckRes, error) {
-	vc.Lock()
-	if vc.cveAllowList == nil {
-		vc.cveAllowList = map[string]struct{}{}
-		for _, str := range vc.CVEIgnoreList {
-			vc.cveAllowList[str] = struct{}{}
-		}
-	}
-	vc.Unlock()
-
-	res := CheckRes{}
-
+func (vc *GrafeasVulnGetter) check(ctx context.Context, dig name.Digest) ([]ImageVulnerability, error) {
 	disc, err := vc.getDiscovery(ctx, dig)
 	if err != nil {
 		return nil, err
 	}
 	switch disc.AnalysisStatus {
 	case grafeaspb.DiscoveryOccurrence_FINISHED_UNSUPPORTED:
-		return &res, nil
+		return nil, nil
 	case grafeaspb.DiscoveryOccurrence_FINISHED_SUCCESS:
 	default:
 		return nil, ErrDiscoverNotFinished
-	}
-
-	if vc.MaxCVSS == 0 {
-		return &res, nil
 	}
 
 	voccs, err := vc.getVulnerabilities(ctx, dig)
@@ -160,43 +108,29 @@ func (vc *GrafeasVulnChecker) check(ctx context.Context, dig name.Digest) (*Chec
 		return nil, err
 	}
 
-	badCVEs := map[string]float32{}
+	var res []ImageVulnerability
+
 	for _, vocc := range voccs {
 		score := vocc.GetCvssScore()
 		cve := vocc.GetShortDescription()
-		if score > vc.MaxCVSS {
-			if _, ok := vc.cveAllowList[cve]; ok {
-				res.Ignored = append(res.Ignored, fmt.Sprintf("%s:%f", cve, score))
-				continue
-			}
-			badCVEs[cve] = score
-			continue
-		}
-		res.Found = append(res.Found, fmt.Sprintf("%s:%f", cve, score))
-	}
-	if len(badCVEs) != 0 {
-		return nil, &ImageCheckError{
-			Image:   dig.Name(),
-			MaxCVSS: vc.MaxCVSS,
-			CVEs:    badCVEs,
-		}
+		res = append(res, ImageVulnerability{
+			ID:   cve,
+			CVSS: score,
+		})
 	}
 
-	return &res, nil
+	return res, nil
 }
 
 // Check waits for a completed vulnerability discovery, and then check that an image
 // has no CVEs that violate the configured policy
-func (vc *GrafeasVulnChecker) Check(ctx context.Context, dig name.Digest) (*CheckRes, error) {
+func (vc *GrafeasVulnGetter) GetVulnerabilities(ctx context.Context, dig name.Digest) ([]ImageVulnerability, error) {
 	var err error
 	img := dig.String()
-	if vc.IgnoreImages != nil && vc.IgnoreImages.MatchString(img) {
-		return &CheckRes{}, nil
-	}
 
 	baseDelay := 500 * time.Millisecond
 	for i := 0; i <= vc.RetryMax; i++ {
-		var res *CheckRes
+		var res []ImageVulnerability
 		res, err = vc.check(ctx, dig)
 		if err == nil {
 			return res, nil
