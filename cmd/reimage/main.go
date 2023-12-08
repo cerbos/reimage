@@ -23,6 +23,7 @@ import (
 
 	containeranalysis "cloud.google.com/go/containeranalysis/apiv1"
 	kms "cloud.google.com/go/kms/apiv1"
+	"github.com/buildkite/shellwords"
 	"github.com/cerbos/reimage"
 	"github.com/google/go-containerregistry/pkg/crane"
 	"github.com/google/go-containerregistry/pkg/name"
@@ -53,12 +54,15 @@ type app struct {
 	StaticMappingsImg     string
 	static                *reimage.StaticRemapper
 	GrafeasParent         string
+	TrivyCommand          string
+	trivyCommand          []string
 	VulnCheckTimeout      time.Duration
 	VulnCheckMaxRetries   int
 	VulnCheckIgnoreList   []string
 	VulnCheckMaxCVSS      float64
 	VulnCheckIgnoreImages string
 	vulnCheckIgnoreImages *regexp.Regexp
+	VulnCheckMethod       string
 
 	BinAuthzAttestor string
 
@@ -101,8 +105,11 @@ func setup() (*app, error) {
 	flag.StringVar(&vulnIgnoreStr, "vulncheck-ignore-cve-list", "", "comma separated list of vulnerabilities to ignore")
 	flag.Float64Var(&a.VulnCheckMaxCVSS, "vulncheck-max-cvss", 0.0, "maximum CVSS vulnerabitility score")
 	flag.StringVar(&a.VulnCheckIgnoreImages, "vulncheck-ignore-images", "", "regexp of images to skip for CVE checks")
+	flag.StringVar(&a.VulnCheckMethod, "vulncheck-method", "trivy", "force the vulnerability check method, (trivy or grafeas)")
 
 	flag.StringVar(&a.GrafeasParent, "grafeas-parent", "", "value for the parent of the grafeas client (e.g. \"project/my-project-id\" for GCP")
+
+	flag.StringVar(&a.TrivyCommand, "trivy-command", "trivy image -f json", "the command to run to retrieve vulnerability scans in trivy's JSON format (the image id will be added as an additional arg")
 
 	flag.StringVar(&a.BinAuthzAttestor, "binauthz-attestor", "", "Google BinAuthz Attestor (e.g. projects/myproj/attestors/myattestor)")
 
@@ -170,6 +177,11 @@ func setup() (*app, error) {
 	err = a.setupRulesConfigs()
 	if err != nil {
 		return &a, err
+	}
+
+	a.trivyCommand, err = shellwords.Split(a.TrivyCommand)
+	if err != nil {
+		return &a, fmt.Errorf("could not parse trivy command, %w", err)
 	}
 
 	return &a, nil
@@ -376,17 +388,33 @@ func (a *app) checkVulns(ctx context.Context, imgs map[string]reimage.QualifiedI
 
 	wg := &sync.WaitGroup{}
 	wg.Add(len(imgs))
-	gc := c.GetGrafeasClient()
-	checker := reimage.GrafeasVulnChecker{
+
+	var vget reimage.VulnGetter
+
+	switch a.VulnCheckMethod {
+	case "trivy":
+		vget = &reimage.TrivyVulnGetter{
+			Command: a.trivyCommand,
+		}
+	case "grafeas":
+		gc := c.GetGrafeasClient()
+		vget = &reimage.GrafeasVulnGetter{
+			Parent:     a.GrafeasParent,
+			Grafeas:    gc,
+			RetryMax:   a.VulnCheckMaxRetries,
+			RetryDelay: a.VulnCheckTimeout,
+
+			Logger: a.log,
+		}
+	default:
+		return fmt.Errorf("unknown scanning method %q, should be grafeas or trivy", a.VulnCheckMethod)
+	}
+
+	checker := reimage.VulnChecker{
+		Getter:        vget,
 		IgnoreImages:  a.vulnCheckIgnoreImages,
-		Parent:        a.GrafeasParent,
-		Grafeas:       gc,
 		MaxCVSS:       float32(a.VulnCheckMaxCVSS),
 		CVEIgnoreList: a.VulnCheckIgnoreList,
-		RetryMax:      a.VulnCheckMaxRetries,
-		RetryDelay:    a.VulnCheckTimeout,
-
-		Logger: a.log,
 	}
 
 	res := map[string]reimage.QualifiedImage{}

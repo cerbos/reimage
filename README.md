@@ -19,7 +19,7 @@ This is intended to:
 - Prevent deploying assets with un-pullable images
 - Localise images for faster start times
 - Potentially improve availability by reducing runtime third party service
-  dependencies (e.g. rDdockerhub)
+  dependencies (e.g. Dockerhub)
 - Help with compliance by pulling all images from registries with image
   scanning
 - Help with the use of in-cluster binary authorization
@@ -128,15 +128,23 @@ The following flags control mappings usage
 ```
 # Grafeas Vulnerability Checking
 
-NOTE: At present, Vulnerability scanning only works with google cloud container registry
+Alternatively, reimage can execute any command compatible with trivy's image scanning
+JSON output to scan images.
 
-reimage can check for Grafeas Discovery occurrences containing CVE checks for
+alternatively trivy can check for Grafeas Discovery occurrences containing CVE checks for
 the discovered images. If discovery checking is enabled, but no completed discovery
 has occurred, reimage will wait for a configurable time. Vulnerability checking
 is disabled by default, and can be enabled by setting `-vulncheck-max-cvss`. If you
 want to scan, but ignore all CVEs, use `-vulncheck-max-cvss 11`
 
+
 ```
+  -grafeas-parent string
+        value for the parent of the grafeas client (e.g. "project/my-project-id" for GCP
+  -trivy-command string
+        the command to run to retrieve vulnerability scans in trivy's JSON format (the image id will be added as an additional arg (default "trivy image -f json")
+  -vulncheck-method string
+        force the vulnerability check method, (trivy or grafeas) (default "trivy")
   -vulncheck-ignore-cve-list string
         comma separated list of vulnerabilities to ignore
   -vulncheck-ignore-images string

@@ -7,13 +7,16 @@ package reimage
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 	"regexp"
+	"sort"
 	"strings"
+	"sync"
 	"text/template"
 
 	"github.com/AsaiYusuke/jsonpath"
@@ -769,4 +772,112 @@ func CompileJSONImageFinders(jmCfgs []JSONImageFinderConfig) (ImagesFinder, erro
 		jms = append(jms, jm)
 	}
 	return jms, nil
+}
+
+type VulnGetter interface {
+	GetVulnerabilities(ctx context.Context, dig name.Digest) ([]ImageVulnerability, error)
+}
+
+// VulnChecker checks that images have been scanned, and checks that
+// they do not contain unexpected vulnerabilities
+type VulnChecker struct {
+	IgnoreImages  *regexp.Regexp // do not look for CVEs in images matching this pattern
+	MaxCVSS       float32        // Maximum permitted CVSS score
+	CVEIgnoreList []string       // CVEs to explicitly ignore
+	Getter        VulnGetter     //
+
+	Logger
+
+	sync.Mutex
+	cveAllowList map[string]struct{}
+}
+
+// ImageCheckError is returned by Check if unwanted vulnerabilities are found
+type ImageCheckError struct {
+	Image   string
+	MaxCVSS float32
+	CVEs    map[string]float32
+}
+
+func (ice *ImageCheckError) Error() string {
+	cvsStrs := []string{}
+	for cve, score := range ice.CVEs {
+		cvsStrs = append(cvsStrs, fmt.Sprintf("%s(%.2f)", cve, score))
+	}
+	sort.Strings(cvsStrs)
+
+	str := fmt.Sprintf(
+		"image %s has %d CVEs with score > %.2f: %s",
+		ice.Image,
+		len(ice.CVEs),
+		ice.MaxCVSS,
+		strings.Join(cvsStrs, ","),
+	)
+
+	return str
+}
+
+type ImageVulnerability struct {
+	ID   string
+	CVSS float32
+}
+
+// VulnCheckResult is the result of a vulnerability check
+type VulnCheckResult struct {
+	Ignored []string // CVEs that were present, but explicitly ignored by the checker
+	Found   []string // CVEs that were present, but under the max requested CVSS
+}
+
+// Check waits for a completed vulnerability discovery, and then check that an image
+// has no CVEs that violate the configured policy
+func (vc *VulnChecker) Check(ctx context.Context, dig name.Digest) (*VulnCheckResult, error) {
+	var err error
+	img := dig.String()
+	if vc.IgnoreImages != nil && vc.IgnoreImages.MatchString(img) {
+		return &VulnCheckResult{}, nil
+	}
+
+	vc.Lock()
+	if vc.cveAllowList == nil {
+		vc.cveAllowList = map[string]struct{}{}
+		for _, str := range vc.CVEIgnoreList {
+			vc.cveAllowList[str] = struct{}{}
+		}
+	}
+	vc.Unlock()
+
+	res := VulnCheckResult{}
+	cves, err := vc.Getter.GetVulnerabilities(ctx, dig)
+	if err != nil {
+		return nil, err
+	}
+
+	if vc.MaxCVSS == 0 {
+		return &res, nil
+	}
+
+	badCVEs := map[string]float32{}
+	for _, cve := range cves {
+		score := cve.CVSS
+		cve := cve.ID
+		if score > vc.MaxCVSS {
+			if _, ok := vc.cveAllowList[cve]; ok {
+				res.Ignored = append(res.Ignored, fmt.Sprintf("%s:%f", cve, score))
+				continue
+			}
+			badCVEs[cve] = score
+			continue
+		}
+		res.Found = append(res.Found, fmt.Sprintf("%s:%f", cve, score))
+	}
+
+	if len(badCVEs) != 0 {
+		return nil, &ImageCheckError{
+			Image:   dig.Name(),
+			MaxCVSS: vc.MaxCVSS,
+			CVEs:    badCVEs,
+		}
+	}
+
+	return &res, nil
 }
