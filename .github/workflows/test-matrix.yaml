@@ -21,7 +21,7 @@ jobs:
         uses: goreleaser/goreleaser-action@v4
         with:
           version: latest
-          args: build --config=.goreleaser.yml --rm-dist --snapshot --single-target
+          args: build --config=.goreleaser.yml --clean --snapshot --single-target
 
       - name: Test
         run: |
