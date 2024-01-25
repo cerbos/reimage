@@ -53,6 +53,7 @@ type app struct {
 	StaticMappings        string
 	StaticMappingsImg     string
 	static                *reimage.StaticRemapper
+	VerifyStaticMappings  bool
 	GrafeasParent         string
 	TrivyCommand          string
 	trivyCommand          []string
@@ -114,6 +115,8 @@ func setup() (*app, error) {
 	flag.StringVar(&a.BinAuthzAttestor, "binauthz-attestor", "", "Google BinAuthz Attestor (e.g. projects/myproj/attestors/myattestor)")
 
 	flag.StringVar(&a.GCPKMSKey, "gcp-kms-key", "", "KMS key, defaults to the first key listed in the binauthz attestation (e.g. projects/PROJECT/locations/LOCATION/keyRings/KEYRING/cryptoKeys/KEY/cryptoKeyVersions/V)")
+
+	flag.BoolVar(&a.VerifyStaticMappings, "verify-static-json-mappings", true, "when loading static mapping, verify that the targets are still valid")
 
 	flag.Parse()
 
@@ -581,7 +584,7 @@ func main() {
 	app.log.Debug("reimage started")
 
 	var mappings map[string]reimage.QualifiedImage
-	rm, recorder, err := app.buildRemapper(!app.MappingsOnly)
+	rm, recorder, err := app.buildRemapper(app.VerifyStaticMappings)
 	if err != nil {
 		app.log.Error(err.Error())
 		os.Exit(1)
