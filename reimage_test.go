@@ -64,10 +64,10 @@ func (tl *testLogger) Info(msg string, args ...any) {
 
 type testUpdater struct {
 	err        error
-	calledWith []runtime.Object
+	calledWith []any
 }
 
-func (tu *testUpdater) Update(obj runtime.Object) error {
+func (tu *testUpdater) Update(obj any) error {
 	tu.calledWith = append(tu.calledWith, obj)
 	return tu.err
 }

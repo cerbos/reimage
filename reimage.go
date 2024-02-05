@@ -518,7 +518,7 @@ func (s *RenameUpdater) processPodSpec(spec *corev1.PodSpec) error {
 }
 
 // Update applies the Remapper to all found images in the object
-func (s *RenameUpdater) Update(obj runtime.Object) error {
+func (s *RenameUpdater) Update(obj any) error {
 	switch t := obj.(type) {
 	case *corev1.Pod:
 		return s.processPodSpec(&t.Spec)
@@ -614,7 +614,7 @@ func (s *RenameUpdater) Update(obj runtime.Object) error {
 
 // Updater is used by Process search for, and update, images in k8s objects
 type Updater interface {
-	Update(obj runtime.Object) error
+	Update(obj any) error
 }
 
 // Process runs the Updater for each kubernetes resource found in the file.
