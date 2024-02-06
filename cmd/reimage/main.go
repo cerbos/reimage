@@ -32,9 +32,13 @@ import (
 	"k8s.io/apimachinery/pkg/util/yaml"
 )
 
+type inputFn func(io.Writer, io.Reader, reimage.Updater) error
+
 type app struct {
 	Version               bool
 	MappingsOnly          bool
+	Input                 string
+	inputFn               inputFn
 	Ignore                string
 	ignore                *regexp.Regexp
 	RenameIgnore          string
@@ -82,7 +86,8 @@ func setup() (*app, error) {
 	flag.BoolVar(&a.DryRun, "dryrun", false, "only log actions")
 	flag.BoolVar(&a.Debug, "debug", false, "enable debug logging")
 
-	flag.StringVar(&a.RulesConfigFile, "rules-config", "", "yaml definition of kind/image-path mappings")
+	flag.StringVar(&a.Input, "input", "k8s", "type of input, (k8s or yaml)")
+	flag.StringVar(&a.RulesConfigFile, "rules-config", "", "yaml definition of kind/image-path mappings, (kind: raw for raw yaml input rules)")
 
 	flag.BoolVar(&a.MappingsOnly, "mappings-only", false, "skip yaml processing, run copying, checks and attestations on all images in the static mappings")
 
@@ -185,6 +190,15 @@ func setup() (*app, error) {
 	a.trivyCommand, err = shellwords.Split(a.TrivyCommand)
 	if err != nil {
 		return &a, fmt.Errorf("could not parse trivy command, %w", err)
+	}
+
+	switch a.Input {
+	case "k8s":
+		a.inputFn = reimage.ProcessK8s
+	case "yaml":
+		a.inputFn = reimage.ProcessRawYAML
+	default:
+		return &a, fmt.Errorf("invalid input type, should be k8s or yaml")
 	}
 
 	return &a, nil
@@ -592,13 +606,13 @@ func main() {
 
 	if !app.MappingsOnly {
 		s := &reimage.RenameUpdater{
-			Ignore:                   app.ignore,
-			Remapper:                 rm,
-			UnstructuredImagesFinder: app.imagFinder,
-			ForceDigests:             app.RenameForceToDigest,
+			Ignore:       app.ignore,
+			Remapper:     rm,
+			ImagesFinder: app.imagFinder,
+			ForceDigests: app.RenameForceToDigest,
 		}
 
-		err = reimage.Process(os.Stdout, os.Stdin, s)
+		err = app.inputFn(os.Stdout, os.Stdin, s)
 		if err != nil {
 			app.log.Error(fmt.Errorf("failed processing input, %w", err).Error())
 			os.Exit(1)

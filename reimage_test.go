@@ -78,7 +78,7 @@ func TestProcess_invalid_yaml(t *testing.T) {
 `
 	out := bytes.NewBuffer([]byte{})
 	tu := &testUpdater{}
-	err := Process(out, bytes.NewBufferString(in), tu)
+	err := ProcessK8s(out, bytes.NewBufferString(in), tu)
 	if err == nil {
 		t.Fatalf("expected invalid json to faili")
 	}
@@ -93,7 +93,7 @@ func TestProcess_empty_yamls(t *testing.T) {
 `
 	out := bytes.NewBuffer([]byte{})
 	tu := &testUpdater{}
-	err := Process(out, bytes.NewBufferString(in), tu)
+	err := ProcessK8s(out, bytes.NewBufferString(in), tu)
 	if err != nil {
 		t.Fatalf("empty yaml blobs should parse")
 	}
@@ -107,7 +107,7 @@ noKind: nonehere
 `
 	out := bytes.NewBuffer([]byte{})
 	tu := &testUpdater{}
-	err := Process(out, bytes.NewBufferString(in), tu)
+	err := ProcessK8s(out, bytes.NewBufferString(in), tu)
 	if err != nil {
 		t.Fatalf("non-kube yaml is passed on")
 	}
@@ -129,7 +129,7 @@ spec:
 
 	out := bytes.NewBuffer([]byte{})
 	tu := &testUpdater{}
-	err := Process(out, bytes.NewBufferString(in), tu)
+	err := ProcessK8s(out, bytes.NewBufferString(in), tu)
 	if err != nil {
 		t.Fatalf("non-kube yaml is passed on")
 	}
@@ -165,10 +165,11 @@ spec:
 		err: te,
 	}
 
-	err := Process(out, bytes.NewBufferString(in), tu)
+	err := ProcessK8s(out, bytes.NewBufferString(in), tu)
 	if err == nil {
 		t.Fatalf("expected an error")
 	}
+	t.Logf("err: %T %v", err, err)
 	if !errors.Is(err, te) {
 		t.Fatalf("expected a testError")
 	}
@@ -293,7 +294,7 @@ func TestCompileJSONImageFinders(t *testing.T) {
 			}
 
 			obj := &unstructured.Unstructured{Object: tt.dataIn}
-			ms, err := mtchr.FindImages(obj)
+			ms, err := mtchr.FindK8sImages(obj)
 			if err != nil {
 				t.Fatalf("master errored, %v", err)
 			}

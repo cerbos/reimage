@@ -23,6 +23,7 @@ import (
 	"github.com/google/go-containerregistry/pkg/crane"
 	"github.com/google/go-containerregistry/pkg/name"
 	"github.com/google/go-containerregistry/pkg/v1/remote/transport"
+	yamlv3 "gopkg.in/yaml.v3"
 
 	appsv1 "k8s.io/api/apps/v1"
 	batchv1 "k8s.io/api/batch/v1"
@@ -372,12 +373,18 @@ func (t *EnsureRemapper) ReMap(h *History) error {
 	return nil
 }
 
+// ErrSkip if this is returned by ReMap then MultiRemapper will
+// ignore this image and skip further processing
 var ErrSkip = errors.New("skip further processing")
 
+// IgnoreRemapper will return ErrSkip for any image name that
+// natches the Ignore regexp
 type IgnoreRemapper struct {
 	Ignore *regexp.Regexp
 }
 
+// ReMap will return ErrSkip for any image name that
+// natches the Ignore regexp
 func (t *IgnoreRemapper) ReMap(h *History) error {
 	name := h.Latest().Name()
 	if t.Ignore != nil && t.Ignore.MatchString(name) {
@@ -445,17 +452,18 @@ func (r *RecorderRemapper) Mappings() (map[string]QualifiedImage, error) {
 // found. Calling the Set method on the map values will replace the discovered
 // image name with a replacement.
 type ImagesFinder interface {
-	FindImages(obj *unstructured.Unstructured) (map[string]ImageSetters, error)
+	FindImages(obj any) (map[string]ImageSetters, error)
+	FindK8sImages(obj *unstructured.Unstructured) (map[string]ImageSetters, error)
 }
 
 // RenameUpdater applies the Remapper to all images found in object passed to Update.
 // For Objects of unknown types the UnstructuredImagesFinder is used.
 // TODO(tcm): rename this thinger.
 type RenameUpdater struct {
-	Ignore                   *regexp.Regexp // Completely ignore images strings matching this regexp
-	UnstructuredImagesFinder ImagesFinder
-	Remapper                 Remapper
-	ForceDigests             bool
+	Ignore       *regexp.Regexp // Completely ignore images strings matching this regexp
+	ImagesFinder ImagesFinder
+	Remapper     Remapper
+	ForceDigests bool
 }
 
 func (s *RenameUpdater) remapImageString(img string) (string, error) {
@@ -517,9 +525,53 @@ func (s *RenameUpdater) processPodSpec(spec *corev1.PodSpec) error {
 	return nil
 }
 
+func (s *RenameUpdater) processUnstructured(obj *unstructured.Unstructured) error {
+	matches, err := s.ImagesFinder.FindK8sImages(obj)
+	if err != nil {
+		return err
+	}
+	for img, setters := range matches {
+		newImg, err := s.remapImageString(img)
+		if err != nil {
+			return err
+		}
+
+		setters.Set(newImg)
+	}
+	return nil
+}
+
+func (s *RenameUpdater) processRaw(obj any) error {
+	matches, err := s.ImagesFinder.FindImages(obj)
+	if err != nil {
+		return err
+	}
+	for img, setters := range matches {
+		newImg, err := s.remapImageString(img)
+		if err != nil {
+			return err
+		}
+
+		setters.Set(newImg)
+	}
+	return nil
+}
+
+// RawYAML is intended to wrap objects that are return from raw YAML unmarshaling
+// the Update method of RenameUpdater will process these by looking for images
+// using FindImages (rather than FindK8sImages). By default this will be any
+// rules that were compiled with "Kind: Raw"
+type RawYAML struct {
+	Object any
+}
+
 // Update applies the Remapper to all found images in the object
 func (s *RenameUpdater) Update(obj any) error {
 	switch t := obj.(type) {
+	case RawYAML:
+		return s.processRaw(t.Object)
+	case *RawYAML:
+		return s.processRaw(t.Object)
 	case *corev1.Pod:
 		return s.processPodSpec(&t.Spec)
 	case *corev1.PodList:
@@ -591,18 +643,7 @@ func (s *RenameUpdater) Update(obj any) error {
 			t.Items[i] = p
 		}
 	case *unstructured.Unstructured:
-		matches, err := s.UnstructuredImagesFinder.FindImages(t)
-		if err != nil {
-			return err
-		}
-		for img, setters := range matches {
-			newImg, err := s.remapImageString(img)
-			if err != nil {
-				return err
-			}
-
-			setters.Set(newImg)
-		}
+		return s.processUnstructured(t)
 	case *runtime.Unknown:
 		return fmt.Errorf("cannot process unknown resource type")
 	default:
@@ -617,9 +658,9 @@ type Updater interface {
 	Update(obj any) error
 }
 
-// Process runs the Updater for each kubernetes resource found in the file.
+// ProcessK8s runs the Updater for each kubernetes resource found in the file.
 // Unknown field are converted to
-func Process(w io.Writer, r io.Reader, u Updater) error {
+func ProcessK8s(w io.Writer, r io.Reader, u Updater) error {
 	yr := yaml.NewYAMLReader(bufio.NewReader(r))
 
 	decoder := scheme.Codecs.UniversalDeserializer()
@@ -655,11 +696,52 @@ func Process(w io.Writer, r io.Reader, u Updater) error {
 
 		err = u.Update(obj)
 		if err != nil {
-			gvk := obj.GetObjectKind().GroupVersionKind()
-			return fmt.Errorf("error updating input %#v, %w", gvk, err)
+			return fmt.Errorf("error updating input %w,", err)
 		}
 
 		pr.PrintObj(obj, w)
+	}
+	return nil
+}
+
+// ProcessRawYAML runs the Updater for each YAML document
+func ProcessRawYAML(w io.Writer, r io.Reader, u Updater) error {
+	yr := yaml.NewYAMLReader(bufio.NewReader(r))
+
+	count := 0
+	for {
+		doc, err := yr.Read()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return err
+		}
+
+		var obj any
+		err = yamlv3.Unmarshal(doc, &obj)
+		if err != nil {
+			return fmt.Errorf("could not read YAML input[%d], %#v,", count, err)
+		}
+
+		err = u.Update(&RawYAML{Object: obj})
+		if err != nil {
+			return fmt.Errorf("error updating input[%d], %w,", count, err)
+		}
+
+		if count != 0 {
+			fmt.Fprintln(w, "---")
+		}
+
+		err = func() error {
+			enc := yamlv3.NewEncoder(w)
+			defer enc.Close()
+			return enc.Encode(obj)
+		}()
+		if err != nil {
+			return fmt.Errorf("error encoding output[%d], %w,", count, err)
+		}
+		count++
 	}
 	return nil
 }
@@ -697,12 +779,11 @@ func (ss ImageSetters) Set(img string) {
 		s(img)
 	}
 }
-
-func (jm jsonImageFinder) FindImages(obj *unstructured.Unstructured) (map[string]ImageSetters, error) {
+func (jm jsonImageFinder) FindImages(obj any) (map[string]ImageSetters, error) {
 	res := map[string]ImageSetters{}
 
 	for _, jpf := range jm.imageJSONPFns {
-		vs, err := jpf((map[string]interface{})(obj.Object))
+		vs, err := jpf(obj)
 		if err != nil {
 			return nil, fmt.Errorf("jsonpath function failed, got %w", err)
 		}
@@ -721,12 +802,25 @@ func (jm jsonImageFinder) FindImages(obj *unstructured.Unstructured) (map[string
 	return res, nil
 }
 
+func (jm jsonImageFinder) FindK8sImages(obj *unstructured.Unstructured) (map[string]ImageSetters, error) {
+	return jm.FindImages((map[string]interface{})(obj.Object))
+}
+
 type jsonImageFinders []*jsonImageFinder
 
-func (jms jsonImageFinders) FindImages(obj *unstructured.Unstructured) (map[string]ImageSetters, error) {
+func (jms jsonImageFinders) FindImages(obj any) (map[string]ImageSetters, error) {
 	for i := range jms {
-		if jms[i].matches(obj) {
+		if jms[i].kind == nil {
 			return jms[i].FindImages(obj)
+		}
+	}
+	return nil, nil
+}
+
+func (jms jsonImageFinders) FindK8sImages(obj *unstructured.Unstructured) (map[string]ImageSetters, error) {
+	for i := range jms {
+		if jms[i].kind != nil && jms[i].matches(obj) {
+			return jms[i].FindK8sImages(obj)
 		}
 	}
 	return nil, nil
@@ -736,14 +830,16 @@ func compileJSONImageFinder(cfg JSONImageFinderConfig) (*jsonImageFinder, error)
 	var err error
 	jm := jsonImageFinder{}
 
-	jm.kind, err = regexp.Compile(cfg.Kind)
-	if err != nil {
-		return nil, fmt.Errorf("failed to compile Kind regexp, %v", err)
-	}
+	if cfg.Kind != "Raw" {
+		jm.kind, err = regexp.Compile(cfg.Kind)
+		if err != nil {
+			return nil, fmt.Errorf("failed to compile Kind regexp, %v", err)
+		}
 
-	jm.apiVersion, err = regexp.Compile(cfg.APIVersion)
-	if err != nil {
-		return nil, fmt.Errorf("failed to compile APIVersion regexp, %v", err)
+		jm.apiVersion, err = regexp.Compile(cfg.APIVersion)
+		if err != nil {
+			return nil, fmt.Errorf("failed to compile APIVersion regexp, %v", err)
+		}
 	}
 
 	config := jsonpath.Config{}
