@@ -290,14 +290,19 @@ func (a *app) readStaticMappings(confirmDigests bool) (*reimage.StaticRemapper, 
 }
 
 func (a *app) writeMappings(mappings map[string]reimage.QualifiedImage) (err error) {
-	bs, _ := json.Marshal(mappings)
+	bs, err := json.Marshal(mappings)
+	if err != nil {
+		return fmt.Errorf("could not marshal mappings, %w", err)
+	}
 
 	if a.DryRun {
 		a.log.Info("dry-run, will not write static mappings file")
 		return nil
 	}
 
+	a.log.Info("writing mappings file", "file", a.WriteMappings)
 	if a.WriteMappings != "" {
+		a.log.Info("writing mappings file", "file", a.WriteMappings)
 		err = os.WriteFile(a.WriteMappings, bs, 0644)
 		if err != nil {
 			return fmt.Errorf("could not write file, %w", err)
