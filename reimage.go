@@ -785,6 +785,9 @@ func (jm jsonImageFinder) FindImages(obj any) (map[string]ImageSetters, error) {
 	for _, jpf := range jm.imageJSONPFns {
 		vs, err := jpf(obj)
 		if err != nil {
+			if _, ok := err.(jsonpath.ErrorMemberNotExist); ok {
+				continue
+			}
 			return nil, fmt.Errorf("jsonpath function failed, got %w", err)
 		}
 

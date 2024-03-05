@@ -272,6 +272,22 @@ func TestCompileJSONImageFinders(t *testing.T) {
 			},
 			1,
 		},
+		{
+			[]JSONImageFinderConfig{
+				{
+					Kind:       "^SomeCRD$",
+					APIVersion: "^somestartup.io$",
+					ImageJSONP: []string{"$.spec.image"},
+				},
+			},
+			"",
+			map[string]interface{}{
+				"kind":       "SomeCRD",
+				"apiVersion": "somestartup.io",
+				"spec":       map[string]interface{}{},
+			},
+			0,
+		},
 	}
 	for i, tt := range tests {
 		tt := tt
