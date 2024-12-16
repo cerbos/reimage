@@ -31,12 +31,11 @@ type GrafeasClient interface {
 // GrafeasVulnGetter checks that images have been scanned, and checks that
 // they do not contain unexpected vulnerabilities
 type GrafeasVulnGetter struct {
-	Grafeas    GrafeasClient
-	Parent     string
-	RetryMax   int           // Max attempts to retrieve vulnerability discovery results
-	RetryDelay time.Duration // Max time to wait for vulnerability discovery results
-
+	Grafeas GrafeasClient
 	Logger
+	Parent     string
+	RetryMax   int
+	RetryDelay time.Duration
 }
 
 func (vc *GrafeasVulnGetter) getDiscovery(ctx context.Context, dig name.Digest) (*grafeaspb.DiscoveryOccurrence, error) {
@@ -54,16 +53,13 @@ func (vc *GrafeasVulnGetter) getDiscovery(ctx context.Context, dig name.Digest) 
 		if err != nil {
 			return nil, err
 		}
-		switch occ.GetKind() {
-		case kind:
+		if occ.GetKind() == kind {
 			return occ.GetDiscovery(), nil
 		}
 	}
 
 	return nil, ErrDiscoveryNotFound
 }
-
-var errVulnerabilitiesNotFound = errors.New("vulnerability assessment not found in response")
 
 func (vc *GrafeasVulnGetter) getVulnerabilities(ctx context.Context, dig name.Digest) ([]*grafeaspb.VulnerabilityOccurrence, error) {
 	req := &grafeaspb.ListOccurrencesRequest{
@@ -80,8 +76,7 @@ func (vc *GrafeasVulnGetter) getVulnerabilities(ctx context.Context, dig name.Di
 		if err != nil {
 			return nil, err
 		}
-		switch occ.GetKind() {
-		case grafeaspb.NoteKind_VULNERABILITY:
+		if occ.GetKind() == grafeaspb.NoteKind_VULNERABILITY {
 			res = append(res, occ.GetVulnerability())
 		}
 	}
@@ -122,7 +117,7 @@ func (vc *GrafeasVulnGetter) check(ctx context.Context, dig name.Digest) ([]Imag
 	return res, nil
 }
 
-// Check waits for a completed vulnerability discovery, and then check that an image
+// GetVulnerabilities waits for a completed vulnerability discovery, and then check that an image
 // has no CVEs that violate the configured policy
 func (vc *GrafeasVulnGetter) GetVulnerabilities(ctx context.Context, dig name.Digest) ([]ImageVulnerability, error) {
 	var err error
@@ -196,15 +191,13 @@ type Keyer interface {
 // GrafeasAttester implements attestation creation and checking using Grafaes
 type GrafeasAttester struct {
 	Grafeas GrafeasClient
-	Parent  string
-
 	Keys    Keyer
-	NoteRef string
-
 	Logger
+	Parent  string
+	NoteRef string
 }
 
-// Get retrieves all the Attestation occurences for the given image that use the provided
+// Get retrieves all the Attestation occurrences for the given image that use the provided
 // noteRef (or all if noteRef is "")
 func (t *GrafeasAttester) Get(ctx context.Context, dig name.Digest, noteRef string) ([]*grafeaspb.AttestationOccurrence, error) {
 	kind := grafeaspb.NoteKind_ATTESTATION
@@ -223,8 +216,7 @@ func (t *GrafeasAttester) Get(ctx context.Context, dig name.Digest, noteRef stri
 		if err != nil {
 			return nil, err
 		}
-		switch occ.GetKind() {
-		case kind:
+		if occ.GetKind() == kind {
 			if noteRef != "" && occ.NoteName != noteRef {
 				continue
 			}

@@ -1,8 +1,6 @@
 ---
 run:
   timeout: 300s
-  skip-dirs:
-    - "^tools/"
   build-tags:
     - tests
 
@@ -53,7 +51,6 @@ linters:
     - gocritic
     - goimports
     - goheader
-    - gomnd
     - gomoddirectives
     - gosec
     - govet
@@ -64,7 +61,6 @@ linters:
     - nilerr
     - noctx
     - nolintlint
-    - prealloc
     - predeclared
     - promlinter
     - revive
@@ -73,13 +69,15 @@ linters:
     - tenv
     - thelper
     - tparallel
-    - unconvert
     - unparam
     - wastedassign
     - whitespace
 
 issues:
   max-same-issues: 30
+
+  exclude-dirs:
+    - "^tools/"
 
   exclude-rules:
     - path: _test\.go

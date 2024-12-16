@@ -35,47 +35,43 @@ import (
 type inputFn func(io.Writer, io.Reader, reimage.Updater) error
 
 type app struct {
-	Version               bool
-	MappingsOnly          bool
-	Input                 string
-	inputFn               inputFn
-	Ignore                string
-	ignore                *regexp.Regexp
-	RenameIgnore          string
-	renameIgnore          *regexp.Regexp
-	RenameRemotePath      string
-	RenameTemplateString  string
-	remoteTemplate        *template.Template
-	RenameForceToDigest   bool
-	Clobber               bool
-	NoCopy                bool
-	RulesConfigFile       string
 	imagFinder            reimage.ImagesFinder
-	DryRun                bool
-	WriteMappings         string
+	remoteTemplate        *template.Template
+	log                   *slog.Logger
+	vulnCheckIgnoreImages *regexp.Regexp
+	inputFn               inputFn
+	static                *reimage.StaticRemapper
+	ignore                *regexp.Regexp
+	renameIgnore          *regexp.Regexp
 	WriteMappingsImg      string
+	VulnCheckIgnoreImages string
+	RenameRemotePath      string
+	GCPKMSKey             string
+	BinAuthzAttestor      string
+	VulnCheckMethod       string
+	RulesConfigFile       string
+	RenameIgnore          string
+	Input                 string
+	WriteMappings         string
+	RenameTemplateString  string
 	StaticMappings        string
 	StaticMappingsImg     string
-	static                *reimage.StaticRemapper
-	VerifyStaticMappings  bool
-	GrafeasParent         string
+	Ignore                string
 	TrivyCommand          string
+	GrafeasParent         string
 	trivyCommand          []string
-	VulnCheckTimeout      time.Duration
-	VulnCheckMaxRetries   int
 	VulnCheckIgnoreList   []string
 	VulnCheckMaxCVSS      float64
-	VulnCheckIgnoreImages string
-	vulnCheckIgnoreImages *regexp.Regexp
-	VulnCheckMethod       string
-
-	BinAuthzAttestor string
-
-	GCPKMSKey string
-
-	Debug bool
-
-	log *slog.Logger
+	VulnCheckTimeout      time.Duration
+	VulnCheckMaxRetries   int
+	Version               bool
+	VerifyStaticMappings  bool
+	DryRun                bool
+	NoCopy                bool
+	Clobber               bool
+	RenameForceToDigest   bool
+	Debug                 bool
+	MappingsOnly          bool
 }
 
 func setup() (*app, error) {
@@ -176,10 +172,8 @@ func setup() (*app, error) {
 		if err != nil {
 			return &a, fmt.Errorf("failed parsing remote template, %w", err)
 		}
-	} else {
-		if a.StaticMappings == "" && a.StaticMappingsImg == "" {
-			log.Info("copying disabled, (remote path and remote template must be set)")
-		}
+	} else if a.StaticMappings == "" && a.StaticMappingsImg == "" {
+		log.Info("copying disabled, (remote path and remote template must be set)")
 	}
 
 	err = a.setupRulesConfigs()
@@ -253,6 +247,7 @@ func readStaticMappingsImage(src string) ([]byte, error) {
 		return nil, fmt.Errorf("could not read image layer tar file, %w", err)
 	}
 	lbs := bytes.NewBuffer([]byte{})
+	//nolint:gosec
 	_, err = io.Copy(lbs, tarrdr)
 	if err != nil {
 		return nil, fmt.Errorf("failed reading image layer tar content, %w", err)
@@ -278,13 +273,13 @@ func (a *app) readStaticMappings(confirmDigests bool) (*reimage.StaticRemapper, 
 	}
 
 	if err != nil {
-		return nil, fmt.Errorf("failed reading json mappings, %v", err)
+		return nil, fmt.Errorf("failed reading json mappings, %w", err)
 	}
 
 	rimgs := map[string]reimage.QualifiedImage{}
 	err = json.Unmarshal(bs, &rimgs)
 	if err != nil {
-		return nil, fmt.Errorf("could not parse as JSON map, %v", err)
+		return nil, fmt.Errorf("could not parse as JSON map, %w", err)
 	}
 	return reimage.NewStaticRemapper(rimgs, confirmDigests)
 }
@@ -303,7 +298,7 @@ func (a *app) writeMappings(mappings map[string]reimage.QualifiedImage) (err err
 	a.log.Info("writing mappings file", "file", a.WriteMappings)
 	if a.WriteMappings != "" {
 		a.log.Info("writing mappings file", "file", a.WriteMappings)
-		err = os.WriteFile(a.WriteMappings, bs, 0644)
+		err = os.WriteFile(a.WriteMappings, bs, 0600)
 		if err != nil {
 			return fmt.Errorf("could not write file, %w", err)
 		}
@@ -478,8 +473,7 @@ func (a *app) checkVulns(ctx context.Context, imgs map[string]reimage.QualifiedI
 	wg.Wait()
 
 	for _, err := range errs {
-		switch {
-		case errors.Is(err, context.Canceled):
+		if errors.Is(err, context.Canceled) {
 			// if there are any context cancelled errors, we'll just return one
 			// directly
 			return err
@@ -581,8 +575,7 @@ func (a *app) attestImages(ctx context.Context, imgs map[string]reimage.Qualifie
 	wg.Wait()
 
 	for _, err := range errs {
-		switch {
-		case errors.Is(err, context.Canceled):
+		if errors.Is(err, context.Canceled) {
 			// if there are any context cancelled errors, we'll just return one
 			// directly
 			return err

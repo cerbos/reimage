@@ -33,12 +33,11 @@ type KMSClient interface {
 // KMS uses Google Cloud KMS to sign and verify data. Only EC_SIGN_P256_SHA256  are supported
 // at this time
 type KMS struct {
-	Client KMSClient
-	Key    string
-
-	keyOnce sync.Once
+	Client  KMSClient
 	keyErr  error
 	key     *ecdsa.PublicKey
+	Key     string
+	keyOnce sync.Once
 }
 
 // Sign bs, returns the signature and key ID of the signing key
@@ -48,7 +47,6 @@ func (ks *KMS) Sign(ctx context.Context, bs []byte) ([]byte, string, error) {
 	crc32c := func(data []byte) uint32 {
 		t := crc32.MakeTable(crc32.Castagnoli)
 		return crc32.Checksum(data, t)
-
 	}
 	digestCRC32C := crc32c(digest[:])
 

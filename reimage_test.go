@@ -38,8 +38,8 @@ import (
 
 type logRecord struct {
 	msg   string
-	level slog.Level
 	args  []any
+	level slog.Level
 }
 type testLogger struct {
 	t       *testing.T
@@ -290,7 +290,6 @@ func TestCompileJSONImageFinders(t *testing.T) {
 		},
 	}
 	for i, tt := range tests {
-		tt := tt
 		t.Run(strconv.Itoa(i), func(t *testing.T) {
 			mtchr, err := CompileJSONImageFinders(tt.in)
 			if tt.expectedErr == "" && err != nil {
@@ -367,6 +366,7 @@ func (rtl *registryTestLogger) Write(p []byte) (n int, err error) {
 	return len(p), nil
 }
 
+//nolint:thelper
 func newTestRegistryLogger(t *testing.T) registry.Option {
 	rtl := &registryTestLogger{t: t}
 	return registry.Logger(log.New(rtl, "", 0))
@@ -521,7 +521,6 @@ func TestRemapUpdater(t *testing.T) {
 		obj runtime.Object
 	}{}
 	for i, tt := range tests {
-		tt := tt
 		t.Run(strconv.Itoa(i), func(t *testing.T) {
 			ru := RenameUpdater{}
 			err := ru.Update(tt.obj)

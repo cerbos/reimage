@@ -14,11 +14,11 @@ import (
 type trivyReport struct {
 	Results []struct {
 		Vulnerabilities []struct {
-			VulnerabilityID string
-			CVSS            map[string]struct {
+			CVSS map[string]struct {
 				V3Score float32
 				V2Score float32
 			}
+			VulnerabilityID string
 		}
 	}
 }
@@ -31,6 +31,7 @@ func (vc *TrivyVulnGetter) GetVulnerabilities(ctx context.Context, dig name.Dige
 	args := vc.Command[1:]
 	args = append(args, dig.String())
 
+	//nolint:gosec
 	cmd := exec.CommandContext(ctx, vc.Command[0], args...)
 	bs, err := cmd.Output()
 	if err != nil {

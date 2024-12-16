@@ -81,8 +81,8 @@ var DefaultLogger = Logger(slog.Default())
 
 // History is the full set of updates performed so far
 type History struct {
-	Refs      []name.Reference
 	DigestStr string
+	Refs      []name.Reference
 }
 
 // NewHistory starts a history for a given reference
@@ -168,12 +168,11 @@ type RepoTemplateInput struct {
 // and the copy is performed using crane.Copy. reimage will then optionally
 // copy the image to the new locatio
 type RenameRemapper struct {
-	Ignore     *regexp.Regexp
-	RemotePath string             // used for the .RemotePath value in the template
-	RemoteTmpl *template.Template // template to build the final image string
-
-	history map[string]string // track existing remaps so that we one ever do 1 to 1
 	Logger
+	history    map[string]string
+	Ignore     *regexp.Regexp
+	RemoteTmpl *template.Template
+	RemotePath string
 }
 
 // ReMap copies an image from the original registry to
@@ -337,10 +336,10 @@ func (s *StaticRemapper) ReMap(h *History) error {
 // EnsureRemapper is a mapper that will copy the original image reference
 // to the latest, possibly remote, reference
 type EnsureRemapper struct {
+	Logger
+
 	NoClobber bool // If true, we'll refuse to overwrite remote images
 	DryRun    bool // If true, don't perform the any actual copies
-
-	Logger
 }
 
 // ReMap copies the original reference to the latest, potentially remote reference
@@ -685,7 +684,7 @@ func ProcessK8s(w io.Writer, r io.Reader, u Updater) error {
 				unk := &runtime.Unknown{}
 				_, _, err = decode(doc, nil, unk)
 				if err != nil {
-					return fmt.Errorf("decoding input failed, %v", err)
+					return fmt.Errorf("decoding input failed, %w", err)
 				}
 				if !(unk.APIVersion == "" || unk.Kind == "") {
 					return fmt.Errorf("unprocessable input found with apiVersion: %q, kind: %q", unk.APIVersion, unk.Kind)
@@ -699,7 +698,7 @@ func ProcessK8s(w io.Writer, r io.Reader, u Updater) error {
 			return fmt.Errorf("error updating input %w,", err)
 		}
 
-		pr.PrintObj(obj, w)
+		_ = pr.PrintObj(obj, w)
 	}
 	return nil
 }
@@ -721,7 +720,7 @@ func ProcessRawYAML(w io.Writer, r io.Reader, u Updater) error {
 		var obj any
 		err = yamlv3.Unmarshal(doc, &obj)
 		if err != nil {
-			return fmt.Errorf("could not read YAML input[%d], %#v,", count, err)
+			return fmt.Errorf("could not read YAML input[%d], %w,", count, err)
 		}
 
 		err = u.Update(&RawYAML{Object: obj})
@@ -785,14 +784,15 @@ func (jm jsonImageFinder) FindImages(obj any) (map[string]ImageSetters, error) {
 	for _, jpf := range jm.imageJSONPFns {
 		vs, err := jpf(obj)
 		if err != nil {
-			if _, ok := err.(jsonpath.ErrorMemberNotExist); ok {
+			var jErr jsonpath.ErrorMemberNotExist
+			if errors.As(err, &jErr) {
 				continue
 			}
 			return nil, fmt.Errorf("jsonpath function failed, got %w", err)
 		}
 
 		for i := range vs {
-			accessor := vs[i].(jsonpath.Accessor)
+			accessor, _ := vs[i].(jsonpath.Accessor)
 			imgI := accessor.Get()
 			imgStr, ok := imgI.(string)
 			if !ok {
@@ -836,12 +836,12 @@ func compileJSONImageFinder(cfg JSONImageFinderConfig) (*jsonImageFinder, error)
 	if cfg.Kind != "Raw" {
 		jm.kind, err = regexp.Compile(cfg.Kind)
 		if err != nil {
-			return nil, fmt.Errorf("failed to compile Kind regexp, %v", err)
+			return nil, fmt.Errorf("failed to compile Kind regexp, %w", err)
 		}
 
 		jm.apiVersion, err = regexp.Compile(cfg.APIVersion)
 		if err != nil {
-			return nil, fmt.Errorf("failed to compile APIVersion regexp, %v", err)
+			return nil, fmt.Errorf("failed to compile APIVersion regexp, %w", err)
 		}
 	}
 
@@ -851,7 +851,7 @@ func compileJSONImageFinder(cfg JSONImageFinderConfig) (*jsonImageFinder, error)
 	for _, jsonpStr := range cfg.ImageJSONP {
 		fn, err := jsonpath.Parse(jsonpStr, config)
 		if err != nil {
-			return nil, fmt.Errorf("failed to parse jsonpath expression %q, %v", jsonpStr, err)
+			return nil, fmt.Errorf("failed to parse jsonpath expression %q, %w", jsonpStr, err)
 		}
 		jm.imageJSONPFns = append(jm.imageJSONPFns, jsonPathFunc(fn))
 	}
@@ -873,6 +873,8 @@ func CompileJSONImageFinders(jmCfgs []JSONImageFinderConfig) (ImagesFinder, erro
 	return jms, nil
 }
 
+// VulnGetter is an interface to any tool that can retrieve vulnerabilities for
+// a given docker image digest
 type VulnGetter interface {
 	GetVulnerabilities(ctx context.Context, dig name.Digest) ([]ImageVulnerability, error)
 }
@@ -880,22 +882,20 @@ type VulnGetter interface {
 // VulnChecker checks that images have been scanned, and checks that
 // they do not contain unexpected vulnerabilities
 type VulnChecker struct {
-	IgnoreImages  *regexp.Regexp // do not look for CVEs in images matching this pattern
-	MaxCVSS       float32        // Maximum permitted CVSS score
-	CVEIgnoreList []string       // CVEs to explicitly ignore
-	Getter        VulnGetter     //
-
+	Getter VulnGetter
 	Logger
-
+	IgnoreImages  *regexp.Regexp
+	cveAllowList  map[string]struct{}
+	CVEIgnoreList []string
 	sync.Mutex
-	cveAllowList map[string]struct{}
+	MaxCVSS float32
 }
 
 // ImageCheckError is returned by Check if unwanted vulnerabilities are found
 type ImageCheckError struct {
+	CVEs    map[string]float32
 	Image   string
 	MaxCVSS float32
-	CVEs    map[string]float32
 }
 
 func (ice *ImageCheckError) Error() string {
@@ -916,6 +916,7 @@ func (ice *ImageCheckError) Error() string {
 	return str
 }
 
+// ImageVulnerability describes a given CVE by ID and score
 type ImageVulnerability struct {
 	ID   string
 	CVSS float32
