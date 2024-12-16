@@ -29,7 +29,7 @@ jobs:
       run: go test ./...
 
     - name: Upload JUnit reports
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4
       with:
         name: junit-reports-${{ strategy.job-index }}
         path: junit.*.xml
