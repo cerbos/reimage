@@ -20,9 +20,6 @@ linters-settings:
     skip-generated: true
     custom-order: true
 
-  gofumpt:
-    extra-rules: true
-
   goheader:
     values:
       const:
@@ -41,14 +38,6 @@ linters-settings:
     allow-leading-space: false
     require-specific: true
 
-  tagliatelle:
-    case:
-      rules:
-        json: goCamel
-        yaml: goCamel
-        xml: goCamel
-        bson: goCamel
-
 linters:
   enable:
     - asciicheck
@@ -58,13 +47,10 @@ linters:
     - durationcheck
     - errorlint
     - exhaustive
-    - exportloopref
-    - forbidigo
+    - copyloopvar
     - forcetypeassert
     - goconst
     - gocritic
-    - godot
-    - gofumpt
     - goimports
     - goheader
     - gomnd
@@ -75,7 +61,6 @@ linters:
     - makezero
     - misspell
     - nakedret
-    - nestif
     - nilerr
     - noctx
     - nolintlint
@@ -85,7 +70,6 @@ linters:
     - revive
     - rowserrcheck
     - sqlclosecheck
-    - tagliatelle
     - tenv
     - thelper
     - tparallel

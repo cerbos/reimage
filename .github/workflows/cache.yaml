@@ -4,45 +4,47 @@ on:
   push:
     branches:
       - main
-  workflow_call:
 
 jobs:
   changes:
-    name: Check for changes
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    outputs:
-      deps: ${{ steps.filter.outputs.deps }}
-    steps:
-      - name: Check out code
-        uses: actions/checkout@v3
+    uses: ./.github/workflows/path-changes.yaml
 
-      - name: Check for changes
-        id: filter
-        uses: dorny/paths-filter@v2
-        with:
-          filters: |
-            deps:
-              - .github/workflows/cache.yaml
-              - "**/go.mod"
-
-  cache:
-    name: Cache dependencies
+  cache-go-deps:
+    name: Cache Go dependencies and tests
     needs: changes
-    if: ${{ needs.changes.outputs.deps == 'true' }}
+    if: ${{ needs.changes.outputs.go_deps == 'true' }}
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 25
+
     steps:
       - name: Check out code
-        uses: actions/checkout@v3
-
-      - name: Install Go and cache dependencies
-        id: setup
-        uses: ./.github/actions/setup-go
+        uses: actions/checkout@v4
         with:
-          write_deps_cache: true
-          write_build_cache: true
+          lfs: true
 
-      - name: Warm cache
-        if: ${{ steps.setup.outputs.cache_hit != 'true' }}
-        run: go build ./...
+      - name: Fix mtimes for Go test cache
+        run:
+          go run hack/ci/update-mtime/main.go
+
+      - name: Install Go and dependencies
+        id: setup-go
+        uses: ./.github/actions/setup-go
+
+      - name: Build caches
+        if: ${{ steps.setup-go.outputs.cache-hit != 'true' }}
+        env:
+          TEST_SKIP_AUTH0_INTEGRATIONS: "true"
+        run: just warm-cache
+
+      - name: Run golangci-lint
+        uses: golangci/golangci-lint-action@v6.1.1
+        with:
+          version: latest
+          args: '--config=.golangci.yaml'
+
+      - name: Write go cache
+        id: cache
+        uses: actions/cache/save@v5
+        with:
+          path: ${{ steps.setup-go.outputs.cache-paths }}
+          key: ${{ steps.setup-go.outputs.cache-key }}
