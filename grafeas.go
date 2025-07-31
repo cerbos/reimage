@@ -1,7 +1,7 @@
-// Copyright 2021-2024 Zenauth Ltd.
+// Copyright 2021-2025 Zenauth Ltd.
 // SPDX-License-Identifier: Apache-2.0
 
-// Package reimage provides tools for processing/updating the images listed in k8s manifests
+// Package reimage provides tools for processing/updating the images listed in k8s manifests.
 package reimage
 
 import (
@@ -17,19 +17,18 @@ import (
 	grafeas "cloud.google.com/go/grafeas/apiv1"
 	"github.com/google/go-containerregistry/pkg/name"
 	"github.com/googleapis/gax-go/v2"
-
 	"google.golang.org/api/iterator"
 	grafeaspb "google.golang.org/genproto/googleapis/grafeas/v1"
 )
 
-// GrafeasClient still isn't mockable, need to wrap it
+// GrafeasClient still isn't mockable, need to wrap it.
 type GrafeasClient interface {
 	ListOccurrences(ctx context.Context, req *grafeaspb.ListOccurrencesRequest, opts ...gax.CallOption) *grafeas.OccurrenceIterator
 	CreateOccurrence(ctx context.Context, req *grafeaspb.CreateOccurrenceRequest, opts ...gax.CallOption) (*grafeaspb.Occurrence, error)
 }
 
 // GrafeasVulnGetter checks that images have been scanned, and checks that
-// they do not contain unexpected vulnerabilities
+// they do not contain unexpected vulnerabilities.
 type GrafeasVulnGetter struct {
 	Grafeas GrafeasClient
 	Logger
@@ -90,7 +89,7 @@ func (vc *GrafeasVulnGetter) check(ctx context.Context, dig name.Digest) ([]Imag
 	if err != nil {
 		return nil, err
 	}
-	switch disc.AnalysisStatus {
+	switch disc.GetAnalysisStatus() {
 	case grafeaspb.DiscoveryOccurrence_FINISHED_UNSUPPORTED:
 		return nil, nil
 	case grafeaspb.DiscoveryOccurrence_FINISHED_SUCCESS:
@@ -103,27 +102,28 @@ func (vc *GrafeasVulnGetter) check(ctx context.Context, dig name.Digest) ([]Imag
 		return nil, err
 	}
 
-	var res []ImageVulnerability
+	res := make([]ImageVulnerability, len(voccs))
 
-	for _, vocc := range voccs {
+	for i, vocc := range voccs {
 		score := vocc.GetCvssScore()
 		cve := vocc.GetShortDescription()
-		res = append(res, ImageVulnerability{
+		res[i] = ImageVulnerability{
 			ID:   cve,
 			CVSS: score,
-		})
+		}
 	}
 
 	return res, nil
 }
 
+var baseDelay = 500 * time.Millisecond
+
 // GetVulnerabilities waits for a completed vulnerability discovery, and then check that an image
-// has no CVEs that violate the configured policy
+// has no CVEs that violate the configured policy.
 func (vc *GrafeasVulnGetter) GetVulnerabilities(ctx context.Context, dig name.Digest) ([]ImageVulnerability, error) {
 	var err error
 	img := dig.String()
 
-	baseDelay := 500 * time.Millisecond
 	for i := 0; i <= vc.RetryMax; i++ {
 		var res []ImageVulnerability
 		res, err = vc.check(ctx, dig)
@@ -131,15 +131,15 @@ func (vc *GrafeasVulnGetter) GetVulnerabilities(ctx context.Context, dig name.Di
 			return res, nil
 		}
 
-		if !(errors.Is(err, ErrDiscoverNotFinished) || errors.Is(err, ErrDiscoveryNotFound)) {
+		if !errors.Is(err, ErrDiscoverNotFinished) && !errors.Is(err, ErrDiscoveryNotFound) {
 			return nil, err
 		}
 
-		secRetry := math.Pow(2, float64(i))
+		secRetry := math.Pow(2, float64(i)) //nolint:mnd
 		delay := time.Duration(secRetry) * baseDelay
 
 		if vc.Logger != nil {
-			vc.Logger.Info("retrying discovery due to error", slog.String("img", img), slog.Duration("delay", delay), slog.String("err", err.Error()))
+			vc.Info("retrying discovery due to error", slog.String("img", img), slog.Duration("delay", delay), slog.String("err", err.Error()))
 		}
 
 		time.Sleep(delay)
@@ -149,7 +149,9 @@ func (vc *GrafeasVulnGetter) GetVulnerabilities(ctx context.Context, dig name.Di
 }
 
 // GCPBinAuthzPayload is the mandated attestation note for
-// signing Docker/OCI images for Google's Binauthz implementation
+// signing Docker/OCI images for Google's Binauthz implementation.
+//
+//nolint:tagliatelle
 type GCPBinAuthzPayload struct {
 	Critical struct {
 		Identity struct {
@@ -163,14 +165,14 @@ type GCPBinAuthzPayload struct {
 }
 
 // GCPBinAuthzConcisePayload is a convenient wrapper around GCPBinAuthzPayload
-// it with json.Marshal to a GCPBinAuthzPayload with correctly set Type
+// it with json.Marshal to a GCPBinAuthzPayload with correctly set Type.
 type GCPBinAuthzConcisePayload struct {
 	DockerReference      string
 	DockerManifestDigest string
 }
 
 // MarshalJSON marshals the provided type to JSON, but conforming
-// to the structure of a GCPBinAuthzPayload
+// to the structure of a GCPBinAuthzPayload.
 func (pl *GCPBinAuthzConcisePayload) MarshalJSON() ([]byte, error) {
 	jpl := GCPBinAuthzPayload{}
 
@@ -182,13 +184,13 @@ func (pl *GCPBinAuthzConcisePayload) MarshalJSON() ([]byte, error) {
 }
 
 // Keyer is an interface to a private key, for signing and verifying
-// blobs
+// blobs.
 type Keyer interface {
 	Sign(ctx context.Context, bs []byte) ([]byte, string, error)
-	Verify(ctx context.Context, bs []byte, sig []byte) error
+	Verify(ctx context.Context, bs, sig []byte) error
 }
 
-// GrafeasAttester implements attestation creation and checking using Grafaes
+// GrafeasAttester implements attestation creation and checking using Grafaes.
 type GrafeasAttester struct {
 	Grafeas GrafeasClient
 	Keys    Keyer
@@ -198,7 +200,7 @@ type GrafeasAttester struct {
 }
 
 // Get retrieves all the Attestation occurrences for the given image that use the provided
-// noteRef (or all if noteRef is "")
+// noteRef (or all if noteRef is "").
 func (t *GrafeasAttester) Get(ctx context.Context, dig name.Digest, noteRef string) ([]*grafeaspb.AttestationOccurrence, error) {
 	kind := grafeaspb.NoteKind_ATTESTATION
 	req := &grafeaspb.ListOccurrencesRequest{
@@ -216,20 +218,20 @@ func (t *GrafeasAttester) Get(ctx context.Context, dig name.Digest, noteRef stri
 		if err != nil {
 			return nil, err
 		}
-		if occ.GetKind() == kind {
-			if noteRef != "" && occ.NoteName != noteRef {
+		if occ.GetKind() == kind { //nolint:nestif
+			if noteRef != "" && occ.GetNoteName() != noteRef {
 				continue
 			}
 			att := occ.GetAttestation()
 			sigs := att.GetSignatures()
 			for i, s := range sigs {
 				if t.Logger != nil {
-					t.Logger.Debug("verify", "payload", att.SerializedPayload, "sig", s.Signature)
+					t.Debug("verify", "payload", att.GetSerializedPayload(), "sig", s.GetSignature())
 				}
-				if err := t.Keys.Verify(ctx, att.SerializedPayload, s.Signature); err != nil {
+				if err := t.Keys.Verify(ctx, att.GetSerializedPayload(), s.GetSignature()); err != nil {
 					if t.Logger != nil {
-						encsig := base64.StdEncoding.EncodeToString(s.Signature)
-						t.Logger.Info("failed to verify attestation", "img", dig.String(), "sig_num", i, "payload", att.SerializedPayload, "sig", encsig, "err", err.Error())
+						encsig := base64.StdEncoding.EncodeToString(s.GetSignature())
+						t.Info("failed to verify attestation", "img", dig.String(), "sig_num", i, "payload", att.GetSerializedPayload(), "sig", encsig, "err", err.Error())
 					}
 					continue
 				}
@@ -244,7 +246,7 @@ func (t *GrafeasAttester) Get(ctx context.Context, dig name.Digest, noteRef stri
 	return res, nil
 }
 
-// Check confirms that a correctly signed attestation for NoteRef exists for the image digest
+// Check confirms that a correctly signed attestation for NoteRef exists for the image digest.
 func (t *GrafeasAttester) Check(ctx context.Context, dig name.Digest) (bool, error) {
 	_, err := t.Get(ctx, dig, t.NoteRef)
 	if err != nil && !errors.Is(err, ErrAttestationNotFound) {
@@ -254,7 +256,7 @@ func (t *GrafeasAttester) Check(ctx context.Context, dig name.Digest) (bool, err
 	return !errors.Is(err, ErrAttestationNotFound), nil
 }
 
-// Attest creates a NoteRef attestation for digest. It will skip this if one already exist
+// Attest creates a NoteRef attestation for digest. It will skip this if one already exist.
 func (t *GrafeasAttester) Attest(ctx context.Context, dig name.Digest) error {
 	ok, err := t.Check(ctx, dig)
 	if err != nil {
@@ -263,7 +265,7 @@ func (t *GrafeasAttester) Attest(ctx context.Context, dig name.Digest) error {
 
 	if ok {
 		if t.Logger != nil {
-			t.Logger.Debug("image %s already attested", "img", dig.String())
+			t.Debug("image %s already attested", "img", dig.String())
 		}
 		return nil
 	}

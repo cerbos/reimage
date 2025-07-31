@@ -1,4 +1,4 @@
-// Copyright 2021-2024 Zenauth Ltd.
+// Copyright 2021-2025 Zenauth Ltd.
 // SPDX-License-Identifier: Apache-2.0
 
 package reimage
@@ -119,6 +119,7 @@ func trimCompare(a, b string) bool {
 		strings.TrimSpace(b),
 	) == 0
 }
+
 func TestProcess_unknownk8s(t *testing.T) {
 	// Helm templates frequently produce these
 	in := `
@@ -176,7 +177,7 @@ spec:
 }
 
 func TestCompileJSONImageFinders(t *testing.T) {
-	var tests = []struct {
+	tests := []struct {
 		in          []JSONImageFinderConfig
 		expectedErr string
 		dataIn      map[string]interface{}
@@ -374,7 +375,7 @@ func newTestRegistryLogger(t *testing.T) registry.Option {
 
 func TestRenameRemapper(t *testing.T) {
 	base := "example.com/firstrepo/test/img1"
-	tagStr := fmt.Sprintf("%s:latest", base)
+	tagStr := base + ":latest"
 	hashStr := "abcdabcdabceabcdabcdabcdabcdabcdabcdabcdabcaacbcbfedabcaefacbaea"
 
 	digStr := fmt.Sprintf("%s@sha256:%s", base, hashStr)
@@ -414,7 +415,7 @@ func TestRenameRemapper(t *testing.T) {
 
 func TestRenameRemapper_Ignore(t *testing.T) {
 	base := "example.com/firstrepo/test/img1"
-	tagStr := fmt.Sprintf("%s:latest", base)
+	tagStr := base + ":latest"
 
 	tagRef, err := name.ParseReference(tagStr)
 	if err != nil {
@@ -461,7 +462,7 @@ func TestEnsureRemapper(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	src := fmt.Sprintf("%s/test/img1", u1.Host)
+	src := u1.Host + "/test/img1"
 
 	// Expected values.
 	img, err := random.Image(1024, 5)
@@ -481,7 +482,7 @@ func TestEnsureRemapper(t *testing.T) {
 
 	imgTag, _ := name.ParseReference(src)
 
-	dst := fmt.Sprintf("%s/imported/test/img1", u2.Host)
+	dst := u2.Host + "/imported/test/img1"
 
 	newTag, _ := name.ParseReference(dst)
 
@@ -514,10 +515,10 @@ func TestEnsureRemapper(t *testing.T) {
 appsv1 "k8s.io/api/apps/v1"
 batchv1 "k8s.io/api/batch/v1"
 corev1 "k8s.io/api/core/v1"
-"k8s.io/client-go/kubernetes/scheme"
+"k8s.io/client-go/kubernetes/scheme".
 */
 func TestRemapUpdater(t *testing.T) {
-	var tests = []struct {
+	tests := []struct {
 		obj runtime.Object
 	}{}
 	for i, tt := range tests {

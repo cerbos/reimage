@@ -2,12 +2,46 @@ name: Set up Go
 
 description: Install Go and Spitfire dependencies
 
+inputs:
+  cache-key-prefix:
+    description: Prefix to allow different caches for different workflows
+    required: false
+    default: generate
+
+outputs:
+  cache-hit:
+    description: true if an exact match was found for the dependency cache key
+    value: ${{ steps.cache.outputs.cache-hit }}
+
+  cache-key:
+    description: Cache key
+    value: ${{ steps.cache-inputs.outputs.key }}
+
+  cache-paths:
+    description: Paths to cache
+    value: ${{ steps.cache-inputs.outputs.paths }}
+
 runs:
   using: composite
+
   steps:
+    - name: Configure cache
+      id: cache-inputs
+      uses: ./.github/actions/go-cache-inputs
+      with:
+        prefix: ${{ inputs.cache-key-prefix }}
+
+    - name: Cache dependencies
+      id: cache
+      uses: actions/cache/restore@v4
+      with:
+        path: ${{ steps.cache-inputs.outputs.paths }}
+        key: ${{ steps.cache-inputs.outputs.key }}
+        restore-keys: ${{ steps.cache-inputs.outputs.restore-keys }}
+
     - name: Install Go
       uses: actions/setup-go@v5
       with:
-        go-version: 1.23.x
+        go-version: 1.24.x
         check-latest: true
-        cache: true
+        cache: false

@@ -1,7 +1,7 @@
-// Copyright 2021-2024 Zenauth Ltd.
+// Copyright 2021-2025 Zenauth Ltd.
 // SPDX-License-Identifier: Apache-2.0
 
-// Package reimage provides tools for processing/updating the images listed in k8s manifests
+// Package reimage provides tools for processing/updating the images listed in k8s manifests.
 package reimage
 
 import (
@@ -24,16 +24,14 @@ import (
 	"github.com/google/go-containerregistry/pkg/name"
 	"github.com/google/go-containerregistry/pkg/v1/remote/transport"
 	yamlv3 "gopkg.in/yaml.v3"
-
 	appsv1 "k8s.io/api/apps/v1"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/client-go/kubernetes/scheme"
-
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/yaml"
 	"k8s.io/cli-runtime/pkg/printers"
+	"k8s.io/client-go/kubernetes/scheme"
 )
 
 func mustCompile(cfgs []JSONImageFinderConfig) ImagesFinder {
@@ -45,11 +43,11 @@ func mustCompile(cfgs []JSONImageFinderConfig) ImagesFinder {
 }
 
 var (
-	// DefaultTemplateStr is a sensible default for importing images
+	// DefaultTemplateStr is a sensible default for importing images.
 	DefaultTemplateStr = `{{ .RemotePath }}/{{ .Registry }}/{{ .Repository }}:{{ .DigestHex }}`
 
 	// DefaultRulesConfig is a set of additional, non-core rules for known existing image
-	// locations
+	// locations.
 	DefaultRulesConfig = []JSONImageFinderConfig{
 		{
 			Kind:       "^Prometheus$",
@@ -60,62 +58,62 @@ var (
 
 	_ = mustCompile(DefaultRulesConfig)
 
-	// ErrDiscoveryNotFound is returned when no Vulnerability checking Discovery is associated with an image
+	// ErrDiscoveryNotFound is returned when no Vulnerability checking Discovery is associated with an image.
 	ErrDiscoveryNotFound = errors.New("discovery not found in response")
 
-	// ErrDiscoverNotFinished is returned when Vulnerability checking did not complete in time
+	// ErrDiscoverNotFinished is returned when Vulnerability checking did not complete in time.
 	ErrDiscoverNotFinished = errors.New("vulnerability checking not completed")
 
-	// ErrAttestationNotFound is return if no attestations are present for a given image digest
+	// ErrAttestationNotFound is return if no attestations are present for a given image digest.
 	ErrAttestationNotFound = errors.New("attestation not found in response")
 )
 
-// Logger is a subset of the slog interface
+// Logger is a subset of the slog interface.
 type Logger interface {
 	Debug(msg string, args ...any)
 	Info(msg string, args ...any)
 }
 
-// DefaultLogger is a quick shortcut to the slog default logger
+// DefaultLogger is a quick shortcut to the slog default logger.
 var DefaultLogger = Logger(slog.Default())
 
-// History is the full set of updates performed so far
+// History is the full set of updates performed so far.
 type History struct {
 	DigestStr string
 	Refs      []name.Reference
 }
 
-// NewHistory starts a history for a given reference
+// NewHistory starts a history for a given reference.
 func NewHistory(ref name.Reference) *History {
 	return &History{
 		Refs: []name.Reference{ref},
 	}
 }
 
-// Original returns the start of the mapping history
+// Original returns the start of the mapping history.
 func (h *History) Original() name.Reference {
 	return h.Refs[0]
 }
 
-// Latest returns the most recent history update
+// Latest returns the most recent history update.
 func (h *History) Latest() name.Reference {
 	return h.Refs[len(h.Refs)-1]
 }
 
-// Add updates the history with a new reference mutation
+// Add updates the history with a new reference mutation.
 func (h *History) Add(ref name.Reference) {
 	h.Refs = append(h.Refs, ref)
 }
 
 // AddDigest sets the known image digest for the image being
-// tracked by this history
+// tracked by this history.
 func (h *History) AddDigest(ref name.Digest) {
 	h.DigestStr = ref.DigestStr()
 }
 
 // OriginalDigest looks through the history to find any previously looked
 // up Digest of the original image. If none is found it is looked
-// up and added to the history
+// up and added to the history.
 func (h *History) OriginalDigest() (name.Digest, error) {
 	ref := h.Original()
 	if h.DigestStr != "" {
@@ -134,7 +132,7 @@ func (h *History) OriginalDigest() (name.Digest, error) {
 }
 
 // LatestDigest constructs a digest name for the latest reference, and the
-// original digest
+// original digest.
 func (h *History) LatestDigest() (name.Digest, error) {
 	dig, err := h.OriginalDigest()
 	if err != nil {
@@ -147,26 +145,26 @@ func (h *History) LatestDigest() (name.Digest, error) {
 	return digest, nil
 }
 
-// A Remapper transforms OCI images references, and may perform side effects
+// A Remapper transforms OCI images references, and may perform side effects.
 type Remapper interface {
 	ReMap(ref *History) error
 }
 
-// RepoTemplateInput is the input provied to the RemoteTmpl of the RepoRemapper
+// RepoTemplateInput is the input provied to the RemoteTmpl of the RepoRemapper.
 type RepoTemplateInput struct {
-	RemotePath string // The request remote repository and registry prefix
-	Digest     string // The digest of the image
-	DigestAlgo string // The hash algorithm of the image digest
-	DigestHex  string // The hex string of the digest hash
-	Tag        string // The image tag (TODO(tcm): not used at the moment)
-	Registry   string // The image registry
-	Repository string // The image repository
+	RemotePath string // The request remote repository and registry prefix.
+	Digest     string // The digest of the image.
+	DigestAlgo string // The hash algorithm of the image digest.
+	DigestHex  string // The hex string of the digest hash.
+	Tag        string // The image tag (TODO(tcm): not used at the moment).
+	Registry   string // The image registry.
+	Repository string // The image repository.
 }
 
 // RenameRemapper is a Remapper implementation that can rename an image to
 // a remote registry/repository path. The new path is built using RemoteTmpl,
 // and the copy is performed using crane.Copy. reimage will then optionally
-// copy the image to the new locatio
+// copy the image to the new location.
 type RenameRemapper struct {
 	Logger
 	history    map[string]string
@@ -176,7 +174,7 @@ type RenameRemapper struct {
 }
 
 // ReMap copies an image from the original registry to
-// a given new destination registry
+// a given new destination registry.
 func (t *RenameRemapper) ReMap(h *History) error {
 	var err error
 	ref := h.Latest()
@@ -270,7 +268,9 @@ func needsUpdate(newRef name.Reference, old name.Digest, log Logger) (bool, erro
 	return true, nil
 }
 
-// QualifiedImage describes an image tag, at a specific digest
+// QualifiedImage describes an image tag, at a specific digest.
+//
+//nolint:tagliatelle
 type QualifiedImage struct {
 	Tag         string   `json:"tag"`
 	Digest      string   `json:"digest"`
@@ -279,14 +279,14 @@ type QualifiedImage struct {
 }
 
 // StaticRemapper is a Remapper implementation that allows statically mapping
-// incoming images to a pre-existing set of known target image names and digests
+// incoming images to a pre-existing set of known target image names and digests.
 type StaticRemapper struct {
 	Mappings     map[string]QualifiedImage
 	AllowMissing bool
 }
 
 // NewStaticRemapper creates a StaticRemapper. If confirmDigest is true, the constructor
-// will check that all target image tags still map to the currently referenced digest
+// will check that all target image tags still map to the currently referenced digest.
 func NewStaticRemapper(mps map[string]QualifiedImage, confirmDigest bool) (*StaticRemapper, error) {
 	for k, v := range mps {
 		_, err := name.ParseReference(k)
@@ -316,7 +316,7 @@ func NewStaticRemapper(mps map[string]QualifiedImage, confirmDigest bool) (*Stat
 
 // ReMap looks up the incoming image in the provided mappings. If AllowMissing is
 // false, attempts to look up images not in the static mappings will fail (if true,
-// ReMap is a no-op)
+// ReMap is a no-op).
 func (s *StaticRemapper) ReMap(h *History) error {
 	refStr := h.Latest().String()
 	staticDetails, ok := s.Mappings[refStr]
@@ -334,7 +334,7 @@ func (s *StaticRemapper) ReMap(h *History) error {
 }
 
 // EnsureRemapper is a mapper that will copy the original image reference
-// to the latest, possibly remote, reference
+// to the latest, possibly remote, reference.
 type EnsureRemapper struct {
 	Logger
 
@@ -342,7 +342,7 @@ type EnsureRemapper struct {
 	DryRun    bool // If true, don't perform the any actual copies
 }
 
-// ReMap copies the original reference to the latest, potentially remote reference
+// ReMap copies the original reference to the latest, potentially remote reference.
 func (t *EnsureRemapper) ReMap(h *History) error {
 	srcRef := h.Original()
 	newRef := h.Latest()
@@ -373,17 +373,17 @@ func (t *EnsureRemapper) ReMap(h *History) error {
 }
 
 // ErrSkip if this is returned by ReMap then MultiRemapper will
-// ignore this image and skip further processing
+// ignore this image and skip further processing.
 var ErrSkip = errors.New("skip further processing")
 
 // IgnoreRemapper will return ErrSkip for any image name that
-// natches the Ignore regexp
+// natches the Ignore regexp.
 type IgnoreRemapper struct {
 	Ignore *regexp.Regexp
 }
 
 // ReMap will return ErrSkip for any image name that
-// natches the Ignore regexp
+// natches the Ignore regexp.
 func (t *IgnoreRemapper) ReMap(h *History) error {
 	name := h.Latest().Name()
 	if t.Ignore != nil && t.Ignore.MatchString(name) {
@@ -396,7 +396,7 @@ func (t *IgnoreRemapper) ReMap(h *History) error {
 type MultiRemapper []Remapper
 
 // ReMap applies each remapper, passing results from one to the next.
-// An error is returned as soon as any remapper fails
+// An error is returned as soon as any remapper fails.
 func (t MultiRemapper) ReMap(h *History) error {
 	var err error
 	for _, rm := range t {
@@ -409,20 +409,20 @@ func (t MultiRemapper) ReMap(h *History) error {
 	return nil
 }
 
-// RecorderRemapper records all remappings up as they are seen
+// RecorderRemapper records all remappings up as they are seen.
 type RecorderRemapper struct {
 	histories []*History
 }
 
 // ReMap records all remappings so far, should usuually be used as the final
-// remapper
+// remapper.
 func (r *RecorderRemapper) ReMap(h *History) error {
 	r.histories = append(r.histories, h)
 	return nil
 }
 
 // Mappings returns the set of image original to final performed by
-// all the remappers
+// all the remappers.
 func (r *RecorderRemapper) Mappings() (map[string]QualifiedImage, error) {
 	res := map[string]QualifiedImage{}
 
@@ -559,12 +559,12 @@ func (s *RenameUpdater) processRaw(obj any) error {
 // RawYAML is intended to wrap objects that are return from raw YAML unmarshaling
 // the Update method of RenameUpdater will process these by looking for images
 // using FindImages (rather than FindK8sImages). By default this will be any
-// rules that were compiled with "Kind: Raw"
+// rules that were compiled with "Kind: Raw".
 type RawYAML struct {
 	Object any
 }
 
-// Update applies the Remapper to all found images in the object
+// Update applies the Remapper to all found images in the object.
 func (s *RenameUpdater) Update(obj any) error {
 	switch t := obj.(type) {
 	case RawYAML:
@@ -644,21 +644,21 @@ func (s *RenameUpdater) Update(obj any) error {
 	case *unstructured.Unstructured:
 		return s.processUnstructured(t)
 	case *runtime.Unknown:
-		return fmt.Errorf("cannot process unknown resource type")
+		return errors.New("cannot process unknown resource type")
 	default:
-		// Some other, uninteresting, k8s type
+		// Some other, uninteresting, k8s type.
 	}
 
 	return nil
 }
 
-// Updater is used by Process search for, and update, images in k8s objects
+// Updater is used by Process search for, and update, images in k8s objects.
 type Updater interface {
 	Update(obj any) error
 }
 
 // ProcessK8s runs the Updater for each kubernetes resource found in the file.
-// Unknown field are converted to
+// Unknown field are converted to.
 func ProcessK8s(w io.Writer, r io.Reader, u Updater) error {
 	yr := yaml.NewYAMLReader(bufio.NewReader(r))
 
@@ -677,7 +677,7 @@ func ProcessK8s(w io.Writer, r io.Reader, u Updater) error {
 		}
 
 		obj, _, err := decode(doc, nil, nil)
-		if err != nil {
+		if err != nil { //nolint:nestif
 			unk := &unstructured.Unstructured{}
 			obj, _, err = decode(doc, nil, unk)
 			if err != nil {
@@ -686,7 +686,7 @@ func ProcessK8s(w io.Writer, r io.Reader, u Updater) error {
 				if err != nil {
 					return fmt.Errorf("decoding input failed, %w", err)
 				}
-				if !(unk.APIVersion == "" || unk.Kind == "") {
+				if unk.APIVersion != "" && unk.Kind != "" {
 					return fmt.Errorf("unprocessable input found with apiVersion: %q, kind: %q", unk.APIVersion, unk.Kind)
 				}
 				continue
@@ -703,7 +703,7 @@ func ProcessK8s(w io.Writer, r io.Reader, u Updater) error {
 	return nil
 }
 
-// ProcessRawYAML runs the Updater for each YAML document
+// ProcessRawYAML runs the Updater for each YAML document.
 func ProcessRawYAML(w io.Writer, r io.Reader, u Updater) error {
 	yr := yaml.NewYAMLReader(bufio.NewReader(r))
 
@@ -748,7 +748,9 @@ func ProcessRawYAML(w io.Writer, r io.Reader, u Updater) error {
 type jsonPathFunc func(src interface{}) ([]interface{}, error)
 
 // JSONImageFinderConfig describes the settings for finding
-// arbitrary image fields in K8S types
+// arbitrary image fields in K8S types.
+//
+//nolint:tagliatelle
 type JSONImageFinderConfig struct {
 	Kind       string   `json:"kind" yaml:"kind"`             // regexp to match k8s kind
 	APIVersion string   `json:"apiVersion" yaml:"apiVersion"` // regexp to match k8s apiVersion
@@ -765,19 +767,20 @@ func (jm jsonImageFinder) matches(obj *unstructured.Unstructured) bool {
 	return jm.kind.MatchString(obj.GetKind()) && jm.apiVersion.MatchString(obj.GetAPIVersion())
 }
 
-// A Setter is used for setting the string description of an image
+// A Setter is used for setting the string description of an image.
 type Setter func(img string)
 
-// ImageSetters is list of one of more Setters
+// ImageSetters is list of one of more Setters.
 type ImageSetters []Setter
 
 // Set all the image setters in the list to the provided
-// image
+// image.
 func (ss ImageSetters) Set(img string) {
 	for _, s := range ss {
 		s(img)
 	}
 }
+
 func (jm jsonImageFinder) FindImages(obj any) (map[string]ImageSetters, error) {
 	res := map[string]ImageSetters{}
 
@@ -806,7 +809,7 @@ func (jm jsonImageFinder) FindImages(obj any) (map[string]ImageSetters, error) {
 }
 
 func (jm jsonImageFinder) FindK8sImages(obj *unstructured.Unstructured) (map[string]ImageSetters, error) {
-	return jm.FindImages((map[string]interface{})(obj.Object))
+	return jm.FindImages(obj.Object)
 }
 
 type jsonImageFinders []*jsonImageFinder
@@ -860,27 +863,28 @@ func compileJSONImageFinder(cfg JSONImageFinderConfig) (*jsonImageFinder, error)
 }
 
 // CompileJSONImageFinders builds an ImagesFinder than can find image configuration
-// strings from arbitrary unstructured K8S JSON objects, using JSONP queries
+// strings from arbitrary unstructured K8S JSON objects, using JSONP queries.
 func CompileJSONImageFinders(jmCfgs []JSONImageFinderConfig) (ImagesFinder, error) {
-	var jms jsonImageFinders
+	jms := make(jsonImageFinders, len(jmCfgs))
+
 	for i, jmCfg := range jmCfgs {
 		jm, err := compileJSONImageFinder(jmCfg)
 		if err != nil {
 			return nil, fmt.Errorf("could not compile json matcher %d, %w", i, err)
 		}
-		jms = append(jms, jm)
+		jms[i] = jm
 	}
 	return jms, nil
 }
 
 // VulnGetter is an interface to any tool that can retrieve vulnerabilities for
-// a given docker image digest
+// a given docker image digest.
 type VulnGetter interface {
 	GetVulnerabilities(ctx context.Context, dig name.Digest) ([]ImageVulnerability, error)
 }
 
 // VulnChecker checks that images have been scanned, and checks that
-// they do not contain unexpected vulnerabilities
+// they do not contain unexpected vulnerabilities.
 type VulnChecker struct {
 	Getter VulnGetter
 	Logger
@@ -891,7 +895,7 @@ type VulnChecker struct {
 	MaxCVSS float32
 }
 
-// ImageCheckError is returned by Check if unwanted vulnerabilities are found
+// ImageCheckError is returned by Check if unwanted vulnerabilities are found.
 type ImageCheckError struct {
 	CVEs    map[string]float32
 	Image   string
@@ -916,20 +920,20 @@ func (ice *ImageCheckError) Error() string {
 	return str
 }
 
-// ImageVulnerability describes a given CVE by ID and score
+// ImageVulnerability describes a given CVE by ID and score.
 type ImageVulnerability struct {
 	ID   string
 	CVSS float32
 }
 
-// VulnCheckResult is the result of a vulnerability check
+// VulnCheckResult is the result of a vulnerability check.
 type VulnCheckResult struct {
-	Ignored []string // CVEs that were present, but explicitly ignored by the checker
-	Found   []string // CVEs that were present, but under the max requested CVSS
+	Ignored []string // CVEs that were present, but explicitly ignored by the checker.
+	Found   []string // CVEs that were present, but under the max requested CVSS.
 }
 
 // Check waits for a completed vulnerability discovery, and then check that an image
-// has no CVEs that violate the configured policy
+// has no CVEs that violate the configured policy.
 func (vc *VulnChecker) Check(ctx context.Context, dig name.Digest) (*VulnCheckResult, error) {
 	var err error
 	img := dig.String()
