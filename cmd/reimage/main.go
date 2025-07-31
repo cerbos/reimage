@@ -1,4 +1,4 @@
-// Copyright 2021-2024 Zenauth Ltd.
+// Copyright 2021-2025 Zenauth Ltd.
 // SPDX-License-Identifier: Apache-2.0
 
 // Package main is the main reimage binary
@@ -24,12 +24,18 @@ import (
 	containeranalysis "cloud.google.com/go/containeranalysis/apiv1"
 	kms "cloud.google.com/go/kms/apiv1"
 	"github.com/buildkite/shellwords"
-	"github.com/cerbos/reimage"
 	"github.com/google/go-containerregistry/pkg/crane"
 	"github.com/google/go-containerregistry/pkg/name"
 	"google.golang.org/api/binaryauthorization/v1"
-
 	"k8s.io/apimachinery/pkg/util/yaml"
+
+	"github.com/cerbos/reimage"
+)
+
+var (
+	defaultVulcheckTimeout             = 10 * time.Minute
+	defaultVulcheckRetries             = 20
+	defaultFSMask          os.FileMode = 0o600
 )
 
 type inputFn func(io.Writer, io.Reader, reimage.Updater) error
@@ -74,7 +80,7 @@ type app struct {
 	MappingsOnly          bool
 }
 
-func setup() (*app, error) {
+func setup(ctx context.Context) (*app, error) {
 	var err error
 	a := app{}
 	vulnIgnoreStr := ""
@@ -102,8 +108,8 @@ func setup() (*app, error) {
 	flag.StringVar(&a.StaticMappings, "static-json-mappings-file", "", "take all mappings from a mappings file")
 	flag.StringVar(&a.StaticMappingsImg, "static-json-mappings-img", "", "take all mapping from a mappings registry image")
 
-	flag.DurationVar(&a.VulnCheckTimeout, "vulncheck-timeout", 10*time.Minute, "how long to wait for vulnerability scanning to complete")
-	flag.IntVar(&a.VulnCheckMaxRetries, "vulncheck-max-retries", 20, "max number of attempts to check for vulnerabilitie")
+	flag.DurationVar(&a.VulnCheckTimeout, "vulncheck-timeout", defaultVulcheckTimeout, "how long to wait for vulnerability scanning to complete")
+	flag.IntVar(&a.VulnCheckMaxRetries, "vulncheck-max-retries", defaultVulcheckRetries, "max number of attempts to check for vulnerabilitie")
 	flag.StringVar(&vulnIgnoreStr, "vulncheck-ignore-cve-list", "", "comma separated list of vulnerabilities to ignore")
 	flag.Float64Var(&a.VulnCheckMaxCVSS, "vulncheck-max-cvss", 0.0, "maximum CVSS vulnerabitility score")
 	flag.StringVar(&a.VulnCheckIgnoreImages, "vulncheck-ignore-images", "", "regexp of images to skip for CVE checks")
@@ -122,7 +128,7 @@ func setup() (*app, error) {
 	flag.Parse()
 
 	if a.Version {
-		printVersion()
+		fmt.Println(versionStr()) //nolint:forbidigo
 		os.Exit(0)
 	}
 
@@ -151,20 +157,20 @@ func setup() (*app, error) {
 
 	// What follows is horrid, and probably a sign of some abstraction breakdown
 	// But basically, if static mapping was specified, we disable/ignore
-	// the rename mapping
+	// the rename mapping.
 	if a.StaticMappings != "" || a.StaticMappingsImg != "" {
 		if a.StaticMappings != "" && a.StaticMappingsImg != "" {
-			return &a, fmt.Errorf("only one static mappings configuration is allowed")
+			return &a, errors.New("only one static mappings configuration is allowed")
 		}
 		if a.RenameRemotePath != "" || a.RenameTemplateString != reimage.DefaultTemplateStr {
-			log.Info("settings static mappings disables image renaming ")
+			log.InfoContext(ctx, "settings static mappings disables image renaming ")
 			a.RenameRemotePath = ""
 			a.RenameTemplateString = ""
 		}
 	}
 
 	if a.MappingsOnly && (a.StaticMappings == "" && a.StaticMappingsImg == "") {
-		return &a, fmt.Errorf("mappings-only requested, but no static mapping file of image specified")
+		return &a, errors.New("mappings-only requested, but no static mapping file of image specified")
 	}
 
 	if a.RenameRemotePath != "" && a.RenameTemplateString != "" {
@@ -173,7 +179,7 @@ func setup() (*app, error) {
 			return &a, fmt.Errorf("failed parsing remote template, %w", err)
 		}
 	} else if a.StaticMappings == "" && a.StaticMappingsImg == "" {
-		log.Info("copying disabled, (remote path and remote template must be set)")
+		log.InfoContext(ctx, "copying disabled, (remote path and remote template must be set)")
 	}
 
 	err = a.setupRulesConfigs()
@@ -192,7 +198,7 @@ func setup() (*app, error) {
 	case "yaml":
 		a.inputFn = reimage.ProcessRawYAML
 	default:
-		return &a, fmt.Errorf("invalid input type, should be k8s or yaml")
+		return &a, errors.New("invalid input type, should be k8s or yaml")
 	}
 
 	return &a, nil
@@ -284,21 +290,21 @@ func (a *app) readStaticMappings(confirmDigests bool) (*reimage.StaticRemapper, 
 	return reimage.NewStaticRemapper(rimgs, confirmDigests)
 }
 
-func (a *app) writeMappings(mappings map[string]reimage.QualifiedImage) (err error) {
+func (a *app) writeMappings(ctx context.Context, mappings map[string]reimage.QualifiedImage) (err error) {
 	bs, err := json.Marshal(mappings)
 	if err != nil {
 		return fmt.Errorf("could not marshal mappings, %w", err)
 	}
 
 	if a.DryRun {
-		a.log.Info("dry-run, will not write static mappings file")
+		a.log.InfoContext(ctx, "dry-run, will not write static mappings file")
 		return nil
 	}
 
-	a.log.Info("writing mappings file", "file", a.WriteMappings)
+	a.log.InfoContext(ctx, "writing mappings file", "file", a.WriteMappings)
 	if a.WriteMappings != "" {
-		a.log.Info("writing mappings file", "file", a.WriteMappings)
-		err = os.WriteFile(a.WriteMappings, bs, 0600)
+		a.log.InfoContext(ctx, "writing mappings file", "file", a.WriteMappings)
+		err = os.WriteFile(a.WriteMappings, bs, defaultFSMask)
 		if err != nil {
 			return fmt.Errorf("could not write file, %w", err)
 		}
@@ -389,10 +395,10 @@ func (a *app) buildRemapper(checkDigests bool) (reimage.Remapper, *reimage.Recor
 	return rm, recorder, nil
 }
 
-// checkVulns most of this should move into the main package
+// checkVulns most of this should move into the main package.
 func (a *app) checkVulns(ctx context.Context, imgs map[string]reimage.QualifiedImage) error {
 	if a.VulnCheckMaxCVSS == 0 {
-		a.log.Info("skipping vulnerability checks (max CVSS is set to 0)")
+		a.log.InfoContext(ctx, "skipping vulnerability checks (max CVSS is set to 0)")
 		return nil
 	}
 
@@ -445,7 +451,7 @@ func (a *app) checkVulns(ctx context.Context, imgs map[string]reimage.QualifiedI
 			vcCtx, vcCancel := context.WithTimeoutCause(ctx, a.VulnCheckTimeout, errors.New("timeout waiting for vuln-check"))
 			defer vcCancel()
 
-			a.log.Debug("start checks on", "img", img.Tag)
+			a.log.DebugContext(ctx, "start checks on", "img", img.Tag)
 			ref, err := name.ParseReference(img.Tag)
 			if err != nil {
 				errs[i] = fmt.Errorf("could not parse ref %q, %w", img, err)
@@ -507,7 +513,7 @@ func (a *app) attestImages(ctx context.Context, imgs map[string]reimage.Qualifie
 	}
 
 	if a.GCPKMSKey == "" {
-		return fmt.Errorf("could not determine signing key, please use -gcp-kms-key")
+		return errors.New("could not determine signing key, please use -gcp-kms-key")
 	}
 
 	kc, err := kms.NewKeyManagementClient(ctx)
@@ -586,23 +592,25 @@ func (a *app) attestImages(ctx context.Context, imgs map[string]reimage.Qualifie
 }
 
 func main() {
+	ctx := context.Background()
+
 	var err error
-	app, err := setup()
+	app, err := setup(ctx)
 	if err != nil {
-		app.log.Error(fmt.Errorf("invalid options, %w", err).Error())
+		app.log.ErrorContext(ctx, fmt.Errorf("invalid options, %w", err).Error())
 		os.Exit(1)
 	}
 
-	app.log.Debug("reimage started")
+	app.log.DebugContext(ctx, "reimage started")
 
 	var mappings map[string]reimage.QualifiedImage
 	rm, recorder, err := app.buildRemapper(app.VerifyStaticMappings)
 	if err != nil {
-		app.log.Error(err.Error())
+		app.log.ErrorContext(ctx, err.Error())
 		os.Exit(1)
 	}
 
-	if !app.MappingsOnly {
+	if !app.MappingsOnly { //nolint:nestif
 		s := &reimage.RenameUpdater{
 			Ignore:       app.ignore,
 			Remapper:     rm,
@@ -612,7 +620,7 @@ func main() {
 
 		err = app.inputFn(os.Stdout, os.Stdin, s)
 		if err != nil {
-			app.log.Error(fmt.Errorf("failed processing input, %w", err).Error())
+			app.log.ErrorContext(ctx, fmt.Errorf("failed processing input, %w", err).Error())
 			os.Exit(1)
 		}
 	} else {
@@ -630,7 +638,7 @@ func main() {
 				continue
 			}
 			if err != nil {
-				app.log.Error(fmt.Errorf("failed processing input, %w", err).Error())
+				app.log.ErrorContext(ctx, fmt.Errorf("failed processing input, %w", err).Error())
 				os.Exit(1)
 			}
 		}
@@ -638,27 +646,25 @@ func main() {
 
 	mappings, err = recorder.Mappings()
 	if err != nil {
-		app.log.Error(fmt.Errorf("mappings were invalid, %w", err).Error())
+		app.log.ErrorContext(ctx, fmt.Errorf("mappings were invalid, %w", err).Error())
 		os.Exit(1)
 	}
-
-	ctx := context.Background()
 
 	err = app.checkVulns(ctx, mappings)
 	if err != nil {
-		app.log.Error(fmt.Errorf("vulncheck failed, %w", err).Error())
+		app.log.ErrorContext(ctx, fmt.Errorf("vulncheck failed, %w", err).Error())
 		os.Exit(1)
 	}
 
-	err = app.writeMappings(mappings)
+	err = app.writeMappings(ctx, mappings)
 	if err != nil {
-		app.log.Error(fmt.Errorf("failed writing mappings, %w", err).Error())
+		app.log.ErrorContext(ctx, fmt.Errorf("failed writing mappings, %w", err).Error())
 		os.Exit(1)
 	}
 
 	err = app.attestImages(ctx, mappings)
 	if err != nil {
-		app.log.Error(fmt.Errorf("failed attesting images, %w", err).Error())
+		app.log.ErrorContext(ctx, fmt.Errorf("failed attesting images, %w", err).Error())
 		os.Exit(1)
 	}
 }

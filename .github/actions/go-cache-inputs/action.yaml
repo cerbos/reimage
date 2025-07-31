@@ -1,0 +1,47 @@
+name: Go cache inputs
+
+description: Configure cache for Go dependencies
+
+inputs:
+  prefix:
+    description: Prefix to allow different caches for different workflows
+    required: true
+
+outputs:
+  paths:
+    description: Paths to cache
+    value: |
+      ~/go/pkg/mod
+      ~/.cache/go-build
+      ~/.cache/spitfire/bin
+
+  key:
+    description: Full cache key
+    value: ${{ steps.cache-key.outputs.key }}
+
+  restore-keys:
+    description: Partial cache keys to use as fallbacks when restoring the cache
+    value: ${{ steps.cache-key.outputs.restore-keys }}
+
+runs:
+  using: composite
+
+  steps:
+    - name: Compute cache key
+      id: cache-key
+      shell: bash
+      run: |
+        prefix="${{ inputs.prefix }}-${{ runner.os }}-go-"
+        date=$(date --utc +%Y-%m-%W-%d)
+        key="${prefix}${date}-${{ hashFiles('**/go.mod') }}-${{ github.sha }}"
+        printf "key=%s\n" "${key}" >> "${GITHUB_OUTPUT}"
+
+        echo "restore-keys<<EOF" >> "${GITHUB_OUTPUT}"
+
+        while [[ "${key}" != "${prefix}" ]]; do
+          key="${key%-}"
+          key="${key%-*}-"
+          printf "%s\n" "${key}" >> "${GITHUB_OUTPUT}"
+        done
+
+        echo "EOF" >> "${GITHUB_OUTPUT}"

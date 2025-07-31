@@ -1,40 +1,57 @@
 version: "2"
 run:
-  build-tags:
-    - tests
+  go: "1.24"
 linters:
   enable:
+    - asasalint
     - asciicheck
     - bidichk
     - bodyclose
     - copyloopvar
     - dupl
     - durationcheck
+    - errchkjson
+    - errname
     - errorlint
     - exhaustive
+    - forbidigo
     - forcetypeassert
+    - gocheckcompilerdirectives
     - goconst
     - gocritic
+    - godot
     - goheader
     - gomoddirectives
     - gosec
     - importas
     - makezero
     - misspell
+    - mnd
     - nakedret
+    - nestif
     - nilerr
     - noctx
     - nolintlint
+    - perfsprint
+    - prealloc
     - predeclared
     - promlinter
+    - protogetter
+    - reassign
     - revive
     - rowserrcheck
     - sqlclosecheck
+    - staticcheck
+    - tagliatelle
+    - testifylint
     - thelper
     - tparallel
+    - unconvert
     - unparam
+    - usetesting
     - wastedassign
     - whitespace
+    - zerologlint
   settings:
     exhaustive:
       default-signifies-exhaustive: true
@@ -45,13 +62,23 @@ linters:
       template: |-
         Copyright {{ YEAR-RANGE }} {{ COMPANY }}
         SPDX-License-Identifier: Apache-2.0
+    gomoddirectives: {}
     govet:
       disable:
         - shadow
       enable-all: true
     nolintlint:
-      require-specific: true
-      allow-unused: true
+      require-specific: false
+      allow-unused: false
+    tagliatelle:
+      case:
+        rules:
+          bson: goCamel
+          json: goCamel
+          xml: goCamel
+          yaml: goCamel
+    usetesting:
+      os-setenv: true
   exclusions:
     generated: lax
     presets:
@@ -66,30 +93,27 @@ linters:
           - goconst
           - govet
           - mnd
+          - unparam
         path: _test\.go
-    paths:
-      - ^tools/
-      - third_party$
-      - builtin$
-      - examples$
+    paths: []
 issues:
   max-same-issues: 30
 formatters:
   enable:
+    - gci
+    - gofumpt
     - goimports
   settings:
     gci:
       sections:
         - standard
         - default
-        - prefix(github.com/cerbos/cerbos)
+        - prefix(github.com/cerbos/reimage)
         - blank
         - dot
       custom-order: true
+    gofumpt:
+      extra-rules: true
   exclusions:
     generated: lax
-    paths:
-      - ^tools/
-      - third_party$
-      - builtin$
-      - examples$
+    paths: []

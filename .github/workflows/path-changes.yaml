@@ -1,0 +1,50 @@
+name: Path Changes
+on:
+  workflow_call:
+    outputs:
+      gh_actions:
+        value: ${{ jobs.changes.outputs.gh_actions }}
+      go_code:
+        value: ${{ jobs.changes.outputs.go_code }}
+      go_deps:
+        value: ${{ jobs.changes.outputs.go_deps }}
+permissions:
+  contents: read
+defaults:
+  run:
+    shell: bash
+jobs:
+  changes:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      gh_actions: ${{ steps.filter.outputs.gh_actions }}
+      go_code: ${{ steps.filter.outputs.go_code }}
+      go_deps: ${{ steps.filter.outputs.go_deps }}
+    steps:
+      - name: Check out code
+        if: github.event_name != 'pull_request'
+        uses: actions/checkout@v4
+
+      - name: Filter changed paths
+        uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            gh_actions:
+              - .github/actions/**
+              - .github/workflows/**
+
+            go_code: &go_code
+              - .github/actions/setup-go/action.yaml
+              - .github/workflows/pr.yaml
+              - cmd/**
+              - .golangci.yaml
+              - go.mod
+              - go.sum
+
+            go_deps:
+              - .github/actions/setup-go/action.yaml
+              - .github/workflows/cache.yaml
+              - go.mod
+              - go.sum

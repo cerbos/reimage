@@ -1,4 +1,4 @@
-// Copyright 2021-2024 Zenauth Ltd.
+// Copyright 2021-2025 Zenauth Ltd.
 // SPDX-License-Identifier: Apache-2.0
 
 // Package reimage provides tools for processing/updating the images listed in k8s manifests
@@ -11,27 +11,27 @@ import (
 	"crypto/x509"
 	"encoding/asn1"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"hash/crc32"
 	"math/big"
 	"strings"
 	"sync"
 
-	"github.com/googleapis/gax-go/v2"
-
 	kmspb "cloud.google.com/go/kms/apiv1/kmspb"
+	"github.com/googleapis/gax-go/v2"
 	"google.golang.org/protobuf/types/known/wrapperspb"
 )
 
 // KMSClient describes all the methods we require for a Google compatible
-// signing service
+// signing service.
 type KMSClient interface {
 	AsymmetricSign(ctx context.Context, req *kmspb.AsymmetricSignRequest, opts ...gax.CallOption) (*kmspb.AsymmetricSignResponse, error)
 	GetPublicKey(ctx context.Context, req *kmspb.GetPublicKeyRequest, opts ...gax.CallOption) (*kmspb.PublicKey, error)
 }
 
 // KMS uses Google Cloud KMS to sign and verify data. Only EC_SIGN_P256_SHA256  are supported
-// at this time
+// at this time.
 type KMS struct {
 	Client  KMSClient
 	keyErr  error
@@ -40,7 +40,7 @@ type KMS struct {
 	keyOnce sync.Once
 }
 
-// Sign bs, returns the signature and key ID of the signing key
+// Sign bs, returns the signature and key ID of the signing key.
 func (ks *KMS) Sign(ctx context.Context, bs []byte) ([]byte, string, error) {
 	digest := sha256.Sum256(bs)
 
@@ -62,17 +62,17 @@ func (ks *KMS) Sign(ctx context.Context, bs []byte) ([]byte, string, error) {
 	if err != nil {
 		return nil, "", err
 	}
-	if !kcresp.VerifiedDigestCrc32C {
-		return nil, "", fmt.Errorf("AsymmetricSign request corrupted in-transit")
+	if !kcresp.GetVerifiedDigestCrc32C() {
+		return nil, "", errors.New("AsymmetricSign request corrupted in-transit")
 	}
-	if kcresp.Name != kcreq.Name {
-		return nil, "", fmt.Errorf("AsymmetricSign request corrupted in-transit")
+	if kcresp.GetName() != kcreq.GetName() {
+		return nil, "", errors.New("AsymmetricSign request corrupted in-transit")
 	}
-	if int64(crc32c(kcresp.Signature)) != kcresp.SignatureCrc32C.Value {
-		return nil, "", fmt.Errorf("AsymmetricSign response corrupted in-transit")
+	if int64(crc32c(kcresp.GetSignature())) != kcresp.GetSignatureCrc32C().GetValue() {
+		return nil, "", errors.New("AsymmetricSign response corrupted in-transit")
 	}
 
-	return kcresp.Signature, ks.Key, nil
+	return kcresp.GetSignature(), ks.Key, nil
 }
 
 func (ks *KMS) getKey(ctx context.Context) {
@@ -95,15 +95,15 @@ func (ks *KMS) getKey(ctx context.Context) {
 	}
 	key, ok := publicKey.(*ecdsa.PublicKey)
 	if !ok {
-		err := fmt.Errorf("public key is not ecdsa")
+		err := errors.New("public key is not ecdsa")
 		ks.keyErr = err
 		return
 	}
 	ks.key = key
 }
 
-// Verify the sig against the data
-func (ks *KMS) Verify(ctx context.Context, bs []byte, data []byte) error {
+// Verify the sig against the data.
+func (ks *KMS) Verify(ctx context.Context, bs, data []byte) error {
 	digest := sha256.Sum256(bs)
 
 	ks.keyOnce.Do(func() { ks.getKey(ctx) })
@@ -119,7 +119,7 @@ func (ks *KMS) Verify(ctx context.Context, bs []byte, data []byte) error {
 	}
 
 	if !ecdsa.Verify(ks.key, digest[:], parsedSig.R, parsedSig.S) {
-		return fmt.Errorf("failed to verify signature")
+		return errors.New("failed to verify signature")
 	}
 
 	return nil
