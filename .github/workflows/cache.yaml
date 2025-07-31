@@ -35,8 +35,8 @@ jobs:
       - name: Build caches
         if: ${{ steps.setup-go.outputs.cache-hit != 'true' }}
         env:
-          TEST_SKIP_AUTH0_INTEGRATIONS: "true"
-        run: just warm-cache
+          CGO_ENABLED: "0"
+        run: "go build ./... && go test -run=ignore  ./... > /dev/null"
 
       - name: Run golangci-lint
         uses: golangci/golangci-lint-action@v8
