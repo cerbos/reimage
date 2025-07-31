@@ -4,6 +4,12 @@ on:
   push:
     tags:
       - v*
+permissions:
+  contents: write
+  issues: write
+  # packages: write
+  # id-token: write
+
 jobs:
   releaseBinaries:
     name: Release Binaries
@@ -19,7 +25,7 @@ jobs:
         uses: ./.github/actions/setup-go
 
       - name: GoReleaser
-        uses: goreleaser/goreleaser-action@v6.3.0
+        uses: goreleaser/goreleaser-action@v6
         with:
           version: latest
           args: release --config=.goreleaser.yml --clean
