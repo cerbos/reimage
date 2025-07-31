@@ -1,59 +1,23 @@
----
+version: "2"
 run:
-  timeout: 300s
   build-tags:
     - tests
-
-linters-settings:
-  exhaustive:
-    default-signifies-exhaustive: true
-
-  gci:
-    sections:
-      - standard
-      - default
-      - prefix(github.com/cerbos/cerbos)
-      - blank
-      - dot
-    skip-generated: true
-    custom-order: true
-
-  goheader:
-    values:
-      const:
-        COMPANY: Zenauth Ltd.
-    template: |-
-      Copyright {{ YEAR-RANGE }} {{ COMPANY }}
-      SPDX-License-Identifier: Apache-2.0
-
-  govet:
-    enable-all: true
-    disable:
-      - shadow
-
-  nolintlint:
-    allow-unused: true # false would be preferable, but it's flaky (https://github.com/golangci/golangci-lint/issues/3228)
-    allow-leading-space: false
-    require-specific: true
-
 linters:
   enable:
     - asciicheck
     - bidichk
     - bodyclose
+    - copyloopvar
     - dupl
     - durationcheck
     - errorlint
     - exhaustive
-    - copyloopvar
     - forcetypeassert
     - goconst
     - gocritic
-    - goimports
     - goheader
     - gomoddirectives
     - gosec
-    - govet
     - importas
     - makezero
     - misspell
@@ -66,24 +30,66 @@ linters:
     - revive
     - rowserrcheck
     - sqlclosecheck
-    - tenv
     - thelper
     - tparallel
     - unparam
     - wastedassign
     - whitespace
-
+  settings:
+    exhaustive:
+      default-signifies-exhaustive: true
+    goheader:
+      values:
+        const:
+          COMPANY: Zenauth Ltd.
+      template: |-
+        Copyright {{ YEAR-RANGE }} {{ COMPANY }}
+        SPDX-License-Identifier: Apache-2.0
+    govet:
+      disable:
+        - shadow
+      enable-all: true
+    nolintlint:
+      require-specific: true
+      allow-unused: true
+  exclusions:
+    generated: lax
+    presets:
+      - comments
+      - common-false-positives
+      - legacy
+      - std-error-handling
+    rules:
+      - linters:
+          - dupl
+          - forcetypeassert
+          - goconst
+          - govet
+          - mnd
+        path: _test\.go
+    paths:
+      - ^tools/
+      - third_party$
+      - builtin$
+      - examples$
 issues:
   max-same-issues: 30
-
-  exclude-dirs:
-    - "^tools/"
-
-  exclude-rules:
-    - path: _test\.go
-      linters:
-        - dupl
-        - forcetypeassert
-        - goconst
-        - gomnd
-        - govet
+formatters:
+  enable:
+    - goimports
+  settings:
+    gci:
+      sections:
+        - standard
+        - default
+        - prefix(github.com/cerbos/cerbos)
+        - blank
+        - dot
+      custom-order: true
+  exclusions:
+    generated: lax
+    paths:
+      - ^tools/
+      - third_party$
+      - builtin$
+      - examples$
