@@ -39,14 +39,14 @@ jobs:
         run: just warm-cache
 
       - name: Run golangci-lint
-        uses: golangci/golangci-lint-action@v6.1.1
+        uses: golangci/golangci-lint-action@v8
         with:
           version: latest
           args: '--config=.golangci.yaml'
 
       - name: Write go cache
         id: cache
-        uses: actions/cache/save@v5
+        uses: actions/cache/save@v4
         with:
           path: ${{ steps.setup-go.outputs.cache-paths }}
           key: ${{ steps.setup-go.outputs.cache-key }}
