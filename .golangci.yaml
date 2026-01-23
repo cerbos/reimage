@@ -33,7 +33,6 @@ linters:
     - noctx
     - nolintlint
     - perfsprint
-    - prealloc
     - predeclared
     - promlinter
     - protogetter

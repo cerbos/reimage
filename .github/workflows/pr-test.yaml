@@ -15,7 +15,7 @@ jobs:
     timeout-minutes: 30
     steps:
     - name: Checkout code
-      uses: actions/checkout@v4
+      uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8
       with:
         lfs: true
 
@@ -26,7 +26,7 @@ jobs:
       run: go tool github.com/rhysd/actionlint/cmd/actionlint
 
     - name: golangci-lint
-      uses: golangci/golangci-lint-action@v8.0.0
+      uses: golangci/golangci-lint-action@1e7e51e771db61008b38414a730f564565cf7c20
       with:
         version: latest
         args: '--config=.golangci.yaml -v'
@@ -35,13 +35,13 @@ jobs:
       run: go test ./...
 
     - name: Upload JUnit reports
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
       with:
         name: junit-reports-${{ strategy.job-index }}
         path: junit.*.xml
 
     - name: Upload to CodeCov
-      uses: codecov/codecov-action@v5
+      uses: codecov/codecov-action@671740ac38dd9b0130fbe1cec585b89eea48d3de
       with:
         token: ${{ secrets.CODECOV_TOKEN }}
         files: "unit.cover,integration.cover"
