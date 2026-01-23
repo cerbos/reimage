@@ -20,7 +20,7 @@ jobs:
 
     steps:
       - name: Check out code
-        uses: actions/checkout@v4
+        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8
         with:
           lfs: true
 
@@ -39,14 +39,14 @@ jobs:
         run: "go build ./... && go test -run=ignore  ./... > /dev/null"
 
       - name: Run golangci-lint
-        uses: golangci/golangci-lint-action@v8
+        uses: golangci/golangci-lint-action@1e7e51e771db61008b38414a730f564565cf7c20
         with:
           version: latest
           args: '--config=.golangci.yaml'
 
       - name: Write go cache
         id: cache
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@8b402f58fbc84540c8b491a91e594a4576fec3d7
         with:
           path: ${{ steps.setup-go.outputs.cache-paths }}
           key: ${{ steps.setup-go.outputs.cache-key }}
