@@ -180,7 +180,7 @@ func TestCompileJSONImageFinders(t *testing.T) {
 	tests := []struct {
 		in          []JSONImageFinderConfig
 		expectedErr string
-		dataIn      map[string]interface{}
+		dataIn      map[string]any
 		expectCnt   int
 	}{
 		{
@@ -228,10 +228,10 @@ func TestCompileJSONImageFinders(t *testing.T) {
 				},
 			},
 			"",
-			map[string]interface{}{
+			map[string]any{
 				"kind":       "OtherCRD",
 				"apiVersion": "somestartup.io",
-				"spec": map[string]interface{}{
+				"spec": map[string]any{
 					"image": "someimage",
 				},
 			},
@@ -246,10 +246,10 @@ func TestCompileJSONImageFinders(t *testing.T) {
 				},
 			},
 			"",
-			map[string]interface{}{
+			map[string]any{
 				"kind":       "SomeCRD",
 				"apiVersion": "otherstartup.io",
-				"spec": map[string]interface{}{
+				"spec": map[string]any{
 					"image": "someimage",
 				},
 			},
@@ -264,10 +264,10 @@ func TestCompileJSONImageFinders(t *testing.T) {
 				},
 			},
 			"",
-			map[string]interface{}{
+			map[string]any{
 				"kind":       "SomeCRD",
 				"apiVersion": "somestartup.io",
-				"spec": map[string]interface{}{
+				"spec": map[string]any{
 					"image": "someimage",
 				},
 			},
@@ -282,10 +282,10 @@ func TestCompileJSONImageFinders(t *testing.T) {
 				},
 			},
 			"",
-			map[string]interface{}{
+			map[string]any{
 				"kind":       "SomeCRD",
 				"apiVersion": "somestartup.io",
-				"spec":       map[string]interface{}{},
+				"spec":       map[string]any{},
 			},
 			0,
 		},

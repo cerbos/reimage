@@ -745,7 +745,7 @@ func ProcessRawYAML(w io.Writer, r io.Reader, u Updater) error {
 	return nil
 }
 
-type jsonPathFunc func(src interface{}) ([]interface{}, error)
+type jsonPathFunc func(src any) ([]any, error)
 
 // JSONImageFinderConfig describes the settings for finding
 // arbitrary image fields in K8S types.

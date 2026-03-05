@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"maps"
 	"os"
 	"regexp"
 	"strings"
@@ -132,7 +133,7 @@ func setup(ctx context.Context) (*app, error) {
 		os.Exit(0)
 	}
 
-	for _, str := range strings.Split(vulnIgnoreStr, ",") {
+	for str := range strings.SplitSeq(vulnIgnoreStr, ",") {
 		str = strings.TrimSpace(str)
 		if str == "" {
 			continue
@@ -486,9 +487,7 @@ func (a *app) checkVulns(ctx context.Context, imgs map[string]reimage.QualifiedI
 		}
 	}
 
-	for k, v := range res {
-		imgs[k] = v
-	}
+	maps.Copy(imgs, res)
 
 	return errors.Join(errs...)
 }
