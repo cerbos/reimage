@@ -33,14 +33,14 @@ runs:
 
     - name: Cache dependencies
       id: cache
-      uses: actions/cache/restore@8b402f58fbc84540c8b491a91e594a4576fec3d7
+      uses: actions/cache/restore@668228422ae6a00e4ad889ee87cd7109ec5666a7
       with:
         path: ${{ steps.cache-inputs.outputs.paths }}
         key: ${{ steps.cache-inputs.outputs.key }}
         restore-keys: ${{ steps.cache-inputs.outputs.restore-keys }}
 
     - name: Install Go
-      uses: actions/setup-go@7a3fe6cf4cb3a834922a1244abfce67bcef6a0c5
+      uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c
       with:
         go-version: 1.26.x
         check-latest: true
