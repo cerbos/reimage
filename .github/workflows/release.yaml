@@ -30,7 +30,7 @@ jobs:
         uses: ./.github/actions/setup-go
 
       - name: GoReleaser
-        uses: goreleaser/goreleaser-action@e435ccd777264be153ace6237001ef4d979d3a7a
+        uses: goreleaser/goreleaser-action@fdcf0b9df926c8dd93d4e7f15c508dd346e09eb1
         with:
           version: latest
           args: release --config=.goreleaser.yml --clean
