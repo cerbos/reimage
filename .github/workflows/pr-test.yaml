@@ -9,15 +9,38 @@ permissions:
   contents: read
 
 jobs:
+  zizmor:
+    name: Run zizmor
+    runs-on: ubuntu-latest
+    permissions:
+      security-events: write
+    steps:
+      - uses: GitHubSecurityLab/actions-permissions/monitor@bf82d13b9b10051d224345ab9184f5ede0a94289 # v1.0.2-beta9
+        with:
+          config: ${{ vars.PERMISSIONS_CONFIG }}
+
+      - name: Check out repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Run zizmor
+        uses: zizmorcore/zizmor-action@71321a20a9ded102f6e9ce5718a2fcec2c4f70d8 # v0.5.2
+
   test:
     name: PR test
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
+    - uses: GitHubSecurityLab/actions-permissions/monitor@bf82d13b9b10051d224345ab9184f5ede0a94289 # v1.0.2-beta9
+      with:
+        config: ${{ vars.PERMISSIONS_CONFIG }}
+
     - name: Checkout code
       uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8
       with:
         lfs: true
+        persist-credentials: false
 
     - name: Install Go
       uses: ./.github/actions/setup-go
@@ -33,16 +56,3 @@ jobs:
 
     - name: Test
       run: go test ./...
-
-    - name: Upload JUnit reports
-      uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
-      with:
-        name: junit-reports-${{ strategy.job-index }}
-        path: junit.*.xml
-
-    - name: Upload to CodeCov
-      uses: codecov/codecov-action@671740ac38dd9b0130fbe1cec585b89eea48d3de
-      with:
-        token: ${{ secrets.CODECOV_TOKEN }}
-        files: "unit.cover,integration.cover"
-

@@ -13,7 +13,6 @@ outputs:
     value: |
       ~/go/pkg/mod
       ~/.cache/go-build
-      ~/.cache/spitfire/bin
 
   key:
     description: Full cache key
@@ -31,7 +30,7 @@ runs:
       id: cache-key
       shell: bash
       run: |
-        prefix="${{ inputs.prefix }}-${{ runner.os }}-go-"
+        prefix="${INPUTS_PREFIX}-${{ runner.os }}-go-"
         date=$(date --utc +%Y-%m-%W-%d)
         key="${prefix}${date}-${{ hashFiles('**/go.mod') }}-${{ github.sha }}"
         printf "key=%s\n" "${key}" >> "${GITHUB_OUTPUT}"
@@ -45,3 +44,5 @@ runs:
         done
 
         echo "EOF" >> "${GITHUB_OUTPUT}"
+      env:
+        INPUTS_PREFIX: ${{ inputs.prefix }}

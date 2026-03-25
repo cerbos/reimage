@@ -28,7 +28,7 @@
       "groupName": "Go deps",
       "groupSlug": "go-deps",
       "postUpdateOptions": [
-        "gomodTidy1.17"
+        "gomodTidy1.26"
       ]
     }
   ],
