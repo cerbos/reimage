@@ -12,11 +12,12 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"maps"
 	"net/http"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
-	"sync"
 	"text/template"
 
 	"github.com/AsaiYusuke/jsonpath"
@@ -888,11 +889,9 @@ type VulnGetter interface {
 type VulnChecker struct {
 	Getter VulnGetter
 	Logger
-	IgnoreImages  *regexp.Regexp
-	cveAllowList  map[string]struct{}
-	CVEIgnoreList []string
-	sync.Mutex
-	MaxCVSS float32
+	IgnoreImages    *regexp.Regexp
+	CVEIgnoreConfig *VulnCheckIgnoreCVESpec
+	MaxCVSS         float32
 }
 
 // ImageCheckError is returned by Check if unwanted vulnerabilities are found.
@@ -941,15 +940,6 @@ func (vc *VulnChecker) Check(ctx context.Context, dig name.Digest) (*VulnCheckRe
 		return &VulnCheckResult{}, nil
 	}
 
-	vc.Lock()
-	if vc.cveAllowList == nil {
-		vc.cveAllowList = map[string]struct{}{}
-		for _, str := range vc.CVEIgnoreList {
-			vc.cveAllowList[str] = struct{}{}
-		}
-	}
-	vc.Unlock()
-
 	res := VulnCheckResult{}
 	cves, err := vc.Getter.GetVulnerabilities(ctx, dig)
 	if err != nil {
@@ -965,7 +955,7 @@ func (vc *VulnChecker) Check(ctx context.Context, dig name.Digest) (*VulnCheckRe
 		score := cve.CVSS
 		cve := cve.ID
 		if score > vc.MaxCVSS {
-			if _, ok := vc.cveAllowList[cve]; ok {
+			if vc.CVEIgnoreConfig.IsIgnored(ctx, dig.Name(), cve) {
 				res.Ignored = append(res.Ignored, fmt.Sprintf("%s:%f", cve, score))
 				continue
 			}
@@ -984,4 +974,64 @@ func (vc *VulnChecker) Check(ctx context.Context, dig name.Digest) (*VulnCheckRe
 	}
 
 	return &res, nil
+}
+
+type VulnCheckIgnoreCVESpec struct {
+	raw map[*regexp.Regexp][]string
+}
+
+func (f *VulnCheckIgnoreCVESpec) String() string {
+	if f.raw == nil {
+		return ""
+	}
+
+	keys := maps.Keys(f.raw)
+	var b strings.Builder
+	fmt.Fprintf(&b, "%s\n", strings.Join((f.raw)[nil], ","))
+	for k := range keys {
+		if k == nil {
+			continue
+		}
+		fmt.Fprintf(&b, "%s=%s\n", k, strings.Join(f.raw[k], ","))
+	}
+
+	return b.String()
+}
+
+// Set implements the flags.Var Set interface
+func (f *VulnCheckIgnoreCVESpec) Set(value string) error {
+	if f.raw == nil {
+		f.raw = map[*regexp.Regexp][]string{}
+	}
+
+	l, r, ok := strings.Cut(value, "=")
+	if !ok {
+		f.raw[nil] = append(f.raw[nil], strings.Split(l, value)...)
+		return nil
+	}
+
+	lre, err := regexp.Compile(l)
+	if err != nil {
+		return fmt.Errorf("bad regexp argument %q, %w", l, err)
+	}
+
+	f.raw[lre] = append(f.raw[lre], strings.Split(r, value)...)
+
+	return nil
+}
+
+func (f *VulnCheckIgnoreCVESpec) IsIgnored(ctx context.Context, img string, cve string) bool {
+	for rxp, igns := range f.raw {
+		if rxp == nil {
+			if slices.Contains(igns, cve) {
+				return true
+			}
+		}
+		if rxp.MatchString(img) {
+			if slices.Contains(igns, cve) {
+				return true
+			}
+		}
+	}
+	return false
 }

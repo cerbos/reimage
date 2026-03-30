@@ -17,6 +17,7 @@ import (
 	"maps"
 	"os"
 	"regexp"
+	"slices"
 	"strings"
 	"sync"
 	"text/template"
@@ -42,49 +43,52 @@ var (
 type inputFn func(io.Writer, io.Reader, reimage.Updater) error
 
 type app struct {
-	imagFinder            reimage.ImagesFinder
-	remoteTemplate        *template.Template
-	log                   *slog.Logger
-	vulnCheckIgnoreImages *regexp.Regexp
-	inputFn               inputFn
-	static                *reimage.StaticRemapper
-	ignore                *regexp.Regexp
-	renameIgnore          *regexp.Regexp
-	WriteMappingsImg      string
-	VulnCheckIgnoreImages string
-	RenameRemotePath      string
-	GCPKMSKey             string
-	BinAuthzAttestor      string
-	VulnCheckMethod       string
-	RulesConfigFile       string
-	RenameIgnore          string
-	Input                 string
-	WriteMappings         string
-	RenameTemplateString  string
-	StaticMappings        string
-	StaticMappingsImg     string
-	Ignore                string
-	TrivyCommand          string
-	GrafeasParent         string
-	trivyCommand          []string
-	VulnCheckIgnoreList   []string
-	VulnCheckMaxCVSS      float64
-	VulnCheckTimeout      time.Duration
-	VulnCheckMaxRetries   int
-	Version               bool
-	VerifyStaticMappings  bool
-	DryRun                bool
-	NoCopy                bool
-	Clobber               bool
-	RenameForceToDigest   bool
-	Debug                 bool
-	MappingsOnly          bool
+	imagFinder             reimage.ImagesFinder
+	remoteTemplate         *template.Template
+	log                    *slog.Logger
+	vulnCheckIgnoreImages  *regexp.Regexp
+	inputFn                inputFn
+	static                 *reimage.StaticRemapper
+	ignore                 *regexp.Regexp
+	renameIgnore           *regexp.Regexp
+	WriteMappingsImg       string
+	VulnCheckIgnoreImages  string
+	RenameRemotePath       string
+	GCPKMSKey              string
+	BinAuthzAttestor       string
+	VulnCheckMethod        string
+	RulesConfigFile        string
+	RenameIgnore           string
+	Input                  string
+	WriteMappings          string
+	RenameTemplateString   string
+	StaticMappings         string
+	StaticMappingsImg      string
+	Ignore                 string
+	GrafeasParent          string
+	VulnCheckCommand       string
+	vulnCheckCommand       []string
+	VulnCheckFormat        string
+	VulnCheckIgnoreCVESpec *reimage.VulnCheckIgnoreCVESpec
+	VulnCheckMaxCVSS       float64
+	VulnCheckTimeout       time.Duration
+	VulnCheckMaxRetries    int
+	Version                bool
+	VerifyStaticMappings   bool
+	DryRun                 bool
+	NoCopy                 bool
+	Clobber                bool
+	RenameForceToDigest    bool
+	Debug                  bool
+	MappingsOnly           bool
 }
 
 func setup(ctx context.Context) (*app, error) {
 	var err error
-	a := app{}
-	vulnIgnoreStr := ""
+	a := app{
+		VulnCheckIgnoreCVESpec: &reimage.VulnCheckIgnoreCVESpec{},
+	}
+
 	flag.BoolVar(&a.Version, "V", false, "print version/build info")
 	flag.BoolVar(&a.DryRun, "dryrun", false, "only log actions")
 	flag.BoolVar(&a.Debug, "debug", false, "enable debug logging")
@@ -111,14 +115,15 @@ func setup(ctx context.Context) (*app, error) {
 
 	flag.DurationVar(&a.VulnCheckTimeout, "vulncheck-timeout", defaultVulcheckTimeout, "how long to wait for vulnerability scanning to complete")
 	flag.IntVar(&a.VulnCheckMaxRetries, "vulncheck-max-retries", defaultVulcheckRetries, "max number of attempts to check for vulnerabilitie")
-	flag.StringVar(&vulnIgnoreStr, "vulncheck-ignore-cve-list", "", "comma separated list of vulnerabilities to ignore")
+	flag.Var(a.VulnCheckIgnoreCVESpec, "vulncheck-ignore-cve-list", "comma separated list of vulnerabilities to ignore")
 	flag.Float64Var(&a.VulnCheckMaxCVSS, "vulncheck-max-cvss", 0.0, "maximum CVSS vulnerabitility score")
 	flag.StringVar(&a.VulnCheckIgnoreImages, "vulncheck-ignore-images", "", "regexp of images to skip for CVE checks")
-	flag.StringVar(&a.VulnCheckMethod, "vulncheck-method", "trivy", "force the vulnerability check method, (trivy or grafeas)")
+	flag.StringVar(&a.VulnCheckMethod, "vulncheck-method", "exec", "force the vulnerability check method, (exec or grafeas)")
 
 	flag.StringVar(&a.GrafeasParent, "grafeas-parent", "", "value for the parent of the grafeas client (e.g. \"project/my-project-id\" for GCP")
 
-	flag.StringVar(&a.TrivyCommand, "trivy-command", "trivy image -f json", "the command to run to retrieve vulnerability scans in trivy's JSON format (the image id will be added as an additional arg")
+	flag.StringVar(&a.VulnCheckCommand, "vulncheck-command", "grype -q -o json", "the command to run to retrieve vulnerability scans in trivy's JSON format (the image id will be added as an additional arg")
+	flag.StringVar(&a.VulnCheckFormat, "vulncheck-format", "grype-json", fmt.Sprintf("the output format of the vulncheck-command (%s)", strings.Join(reimage.VulnOutputFormats, ",")))
 
 	flag.StringVar(&a.BinAuthzAttestor, "binauthz-attestor", "", "Google BinAuthz Attestor (e.g. projects/myproj/attestors/myattestor)")
 
@@ -131,14 +136,6 @@ func setup(ctx context.Context) (*app, error) {
 	if a.Version {
 		fmt.Println(versionStr()) //nolint:forbidigo
 		os.Exit(0)
-	}
-
-	for str := range strings.SplitSeq(vulnIgnoreStr, ",") {
-		str = strings.TrimSpace(str)
-		if str == "" {
-			continue
-		}
-		a.VulnCheckIgnoreList = append(a.VulnCheckIgnoreList, str)
 	}
 
 	log := a.setupLog()
@@ -154,6 +151,10 @@ func setup(ctx context.Context) (*app, error) {
 
 	if a.VulnCheckIgnoreImages != "" {
 		a.vulnCheckIgnoreImages = regexp.MustCompile(a.VulnCheckIgnoreImages)
+	}
+
+	if !slices.Contains(reimage.VulnOutputFormats, a.VulnCheckFormat) {
+		return &a, fmt.Errorf("unknown vulnerability command output format %q", a.VulnCheckFormat)
 	}
 
 	// What follows is horrid, and probably a sign of some abstraction breakdown
@@ -188,7 +189,7 @@ func setup(ctx context.Context) (*app, error) {
 		return &a, err
 	}
 
-	a.trivyCommand, err = shellwords.Split(a.TrivyCommand)
+	a.vulnCheckCommand, err = shellwords.Split(a.VulnCheckCommand)
 	if err != nil {
 		return &a, fmt.Errorf("could not parse trivy command, %w", err)
 	}
@@ -416,9 +417,10 @@ func (a *app) checkVulns(ctx context.Context, imgs map[string]reimage.QualifiedI
 	var vget reimage.VulnGetter
 
 	switch a.VulnCheckMethod {
-	case "trivy":
-		vget = &reimage.TrivyVulnGetter{
-			Command: a.trivyCommand,
+	case "exec":
+		vget = &reimage.ExecVulnGetter{
+			Command:   a.vulnCheckCommand,
+			OutFormat: a.VulnCheckFormat,
 		}
 	case "grafeas":
 		gc := c.GetGrafeasClient()
@@ -431,14 +433,14 @@ func (a *app) checkVulns(ctx context.Context, imgs map[string]reimage.QualifiedI
 			Logger: a.log,
 		}
 	default:
-		return fmt.Errorf("unknown scanning method %q, should be grafeas or trivy", a.VulnCheckMethod)
+		return fmt.Errorf("unknown scanning method %q, should be grafeas or exec", a.VulnCheckMethod)
 	}
 
 	checker := reimage.VulnChecker{
-		Getter:        vget,
-		IgnoreImages:  a.vulnCheckIgnoreImages,
-		MaxCVSS:       float32(a.VulnCheckMaxCVSS),
-		CVEIgnoreList: a.VulnCheckIgnoreList,
+		Getter:          vget,
+		IgnoreImages:    a.vulnCheckIgnoreImages,
+		MaxCVSS:         float32(a.VulnCheckMaxCVSS),
+		CVEIgnoreConfig: a.VulnCheckIgnoreCVESpec,
 	}
 
 	res := map[string]reimage.QualifiedImage{}
