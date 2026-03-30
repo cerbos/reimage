@@ -49,7 +49,7 @@ jobs:
       run: go tool github.com/rhysd/actionlint/cmd/actionlint
 
     - name: golangci-lint
-      uses: golangci/golangci-lint-action@e94e72cadf128c23a9a0e7997b84fc0c9bbca7ad
+      uses: golangci/golangci-lint-action@2d7e7b678591ee3321638e5c5621ca689628daa4
       with:
         version: latest
         args: '--config=.golangci.yaml -v'
