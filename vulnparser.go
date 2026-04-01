@@ -37,6 +37,9 @@ func (tr *trivyJSONReport) ParseReport() ([]ImageVulnerability, error) {
 	for _, r := range tr.Results {
 		for _, v := range r.Vulnerabilities {
 			score := float32(0.0)
+			if len(v.CVSS) == 0 {
+				score = 5.0 // Default to 5.0 if no CVSS are provided, grype does this
+			}
 			for _, cv := range v.CVSS {
 				s := cv.V2Score
 				if cv.V3Score != 0.0 {
@@ -65,7 +68,8 @@ type grypeJSONReport struct {
 					BaseScore float32
 				}
 			}
-			ID string
+			ID          string
+			Description string
 		}
 	}
 }
@@ -75,6 +79,9 @@ func (tr *grypeJSONReport) ParseReport() ([]ImageVulnerability, error) {
 	for _, r := range tr.Matches {
 		v := r.Vulnerability
 		score := float32(0.0)
+		if len(v.CVSS) == 0 {
+			score = 5.0 // Default to 5.0 if no CVSS are provided, grype does this
+		}
 		for _, cv := range v.CVSS {
 			s := cv.Metrics.BaseScore
 			if s > score {
@@ -84,6 +91,7 @@ func (tr *grypeJSONReport) ParseReport() ([]ImageVulnerability, error) {
 		res = append(res, ImageVulnerability{
 			ID:   v.ID,
 			CVSS: score,
+			Desc: v.Description,
 		})
 	}
 	return res, nil

@@ -896,7 +896,10 @@ type VulnChecker struct {
 
 // ImageCheckError is returned by Check if unwanted vulnerabilities are found.
 type ImageCheckError struct {
-	CVEs    map[string]float32
+	CVEs map[string]struct {
+		Score float32
+		Desc  string
+	}
 	Image   string
 	MaxCVSS float32
 }
@@ -923,6 +926,7 @@ func (ice *ImageCheckError) Error() string {
 type ImageVulnerability struct {
 	ID   string
 	CVSS float32
+	Desc string
 }
 
 // VulnCheckResult is the result of a vulnerability check.
@@ -950,19 +954,28 @@ func (vc *VulnChecker) Check(ctx context.Context, dig name.Digest) (*VulnCheckRe
 		return &res, nil
 	}
 
-	badCVEs := map[string]float32{}
+	badCVEs := map[string]struct {
+		Score float32
+		Desc  string
+	}{}
 	for _, cve := range cves {
 		score := cve.CVSS
-		cve := cve.ID
+		id := cve.ID
 		if score > vc.MaxCVSS {
-			if vc.CVEIgnoreConfig.IsIgnored(ctx, dig.Name(), cve) {
-				res.Ignored = append(res.Ignored, fmt.Sprintf("%s:%f", cve, score))
+			if vc.CVEIgnoreConfig.IsIgnored(ctx, dig.Name(), id) {
+				res.Ignored = append(res.Ignored, fmt.Sprintf("%s:%f", id, score))
 				continue
 			}
-			badCVEs[cve] = score
+			badCVEs[id] = struct {
+				Score float32
+				Desc  string
+			}{
+				Score: score,
+				Desc:  cve.Desc,
+			}
 			continue
 		}
-		res.Found = append(res.Found, fmt.Sprintf("%s:%f", cve, score))
+		res.Found = append(res.Found, fmt.Sprintf("%s:%f", id, score))
 	}
 
 	if len(badCVEs) != 0 {

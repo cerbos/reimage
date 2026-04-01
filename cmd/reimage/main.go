@@ -122,7 +122,7 @@ func setup(ctx context.Context) (*app, error) {
 
 	flag.StringVar(&a.GrafeasParent, "grafeas-parent", "", "value for the parent of the grafeas client (e.g. \"project/my-project-id\" for GCP")
 
-	flag.StringVar(&a.VulnCheckCommand, "vulncheck-command", "grype -q -o json", "the command to run to retrieve vulnerability scans in trivy's JSON format (the image id will be added as an additional arg")
+	flag.StringVar(&a.VulnCheckCommand, "vulncheck-command", "grype -q --by-cve -o json", "the command to run to retrieve vulnerability scans in trivy's JSON format (the image id will be added as an additional arg")
 	flag.StringVar(&a.VulnCheckFormat, "vulncheck-format", "grype-json", fmt.Sprintf("the output format of the vulncheck-command (%s)", strings.Join(reimage.VulnOutputFormats, ",")))
 
 	flag.StringVar(&a.BinAuthzAttestor, "binauthz-attestor", "", "Google BinAuthz Attestor (e.g. projects/myproj/attestors/myattestor)")
@@ -662,7 +662,8 @@ func main() {
 							"Unacceptable vulnerability",
 							slog.String("image", err.Image),
 							slog.String("cve", cve),
-							slog.Float64("cvss", float64(err.CVEs[cve])),
+							slog.Float64("cvss", float64(err.CVEs[cve].Score)),
+							slog.String("cve_desc", err.CVEs[cve].Desc),
 						)
 					}
 				} else {
