@@ -1006,7 +1006,7 @@ func (f *VulnCheckIgnoreCVESpec) Set(value string) error {
 
 	l, r, ok := strings.Cut(value, "=")
 	if !ok {
-		f.raw[nil] = append(f.raw[nil], strings.Split(l, value)...)
+		f.raw[nil] = append(f.raw[nil], strings.Split(l, ",")...)
 		return nil
 	}
 
@@ -1015,7 +1015,7 @@ func (f *VulnCheckIgnoreCVESpec) Set(value string) error {
 		return fmt.Errorf("bad regexp argument %q, %w", l, err)
 	}
 
-	f.raw[lre] = append(f.raw[lre], strings.Split(r, value)...)
+	f.raw[lre] = append(f.raw[lre], strings.Split(r, ",")...)
 
 	return nil
 }
@@ -1026,6 +1026,7 @@ func (f *VulnCheckIgnoreCVESpec) IsIgnored(ctx context.Context, img string, cve 
 			if slices.Contains(igns, cve) {
 				return true
 			}
+			continue
 		}
 		if rxp.MatchString(img) {
 			if slices.Contains(igns, cve) {
