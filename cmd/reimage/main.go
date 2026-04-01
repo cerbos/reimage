@@ -653,7 +653,26 @@ func main() {
 
 	err = app.checkVulns(ctx, mappings)
 	if err != nil {
-		app.log.ErrorContext(ctx, fmt.Errorf("vulncheck failed, %w", err).Error())
+		if errsI, ok := err.(interface{ Unwrap() []error }); ok {
+			for _, err := range errsI.Unwrap() {
+				if err, ok := errors.AsType[*reimage.ImageCheckError](err); ok && err != nil {
+					for _, cve := range slices.Sorted(maps.Keys(err.CVEs)) {
+						app.log.ErrorContext(
+							ctx,
+							"Unacceptable vulnerability",
+							slog.String("image", err.Image),
+							slog.String("cve", cve),
+							slog.Float64("cvss", float64(err.CVEs[cve])),
+						)
+					}
+				} else {
+					app.log.ErrorContext(ctx, fmt.Errorf("vulncheck failed, %w", err).Error())
+				}
+			}
+		} else {
+			app.log.ErrorContext(ctx, fmt.Errorf("vulncheck failed, %w", err).Error())
+		}
+
 		os.Exit(1)
 	}
 
