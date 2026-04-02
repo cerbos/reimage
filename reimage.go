@@ -906,8 +906,8 @@ type ImageCheckError struct {
 
 func (ice *ImageCheckError) Error() string {
 	cvsStrs := []string{}
-	for cve, score := range ice.CVEs {
-		cvsStrs = append(cvsStrs, fmt.Sprintf("%s(%.2f)", cve, score))
+	for cve, data := range ice.CVEs {
+		cvsStrs = append(cvsStrs, fmt.Sprintf("%s(%.2f)", cve, data.Score))
 	}
 	sort.Strings(cvsStrs)
 
