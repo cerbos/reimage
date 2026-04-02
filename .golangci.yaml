@@ -65,6 +65,7 @@ linters:
     govet:
       disable:
         - shadow
+        - fieldalignment
       enable-all: true
     nolintlint:
       require-specific: false

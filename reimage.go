@@ -1011,7 +1011,7 @@ func (f *VulnCheckIgnoreCVESpec) String() string {
 	return b.String()
 }
 
-// Set implements the flags.Var Set interface
+// Set implements the flags.Var Set interface.
 func (f *VulnCheckIgnoreCVESpec) Set(value string) error {
 	if f.raw == nil {
 		f.raw = map[*regexp.Regexp][]string{}
@@ -1033,7 +1033,7 @@ func (f *VulnCheckIgnoreCVESpec) Set(value string) error {
 	return nil
 }
 
-func (f *VulnCheckIgnoreCVESpec) IsIgnored(ctx context.Context, img string, cve string) bool {
+func (f *VulnCheckIgnoreCVESpec) IsIgnored(_ context.Context, img, cve string) bool {
 	for rxp, igns := range f.raw {
 		if rxp == nil {
 			if slices.Contains(igns, cve) {

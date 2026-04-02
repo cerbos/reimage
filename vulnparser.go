@@ -12,14 +12,9 @@ import (
 	"github.com/google/go-containerregistry/pkg/name"
 )
 
-var (
-	VulnOutputFormats = []string{
-		"trivy-json",
-		"grype-json",
-	}
-)
+var VulnOutputFormats = []string{"trivy-json", "grype-json"}
 
-// trivyJSONReport parses the JSON output of trivy -o json
+// trivyJSONReport parses the JSON output of trivy -o json.
 type trivyJSONReport struct {
 	Results []struct {
 		Vulnerabilities []struct {
@@ -58,7 +53,7 @@ func (tr *trivyJSONReport) ParseReport() ([]ImageVulnerability, error) {
 	return res, nil
 }
 
-// grypeJSONReport parses the JSON output of grype -o json
+// grypeJSONReport parses the JSON output of grype -o json.
 type grypeJSONReport struct {
 	Matches []struct {
 		Vulnerability struct {

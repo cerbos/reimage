@@ -592,6 +592,32 @@ func (a *app) attestImages(ctx context.Context, imgs map[string]reimage.Qualifie
 	return errors.Join(errs...)
 }
 
+func logVulnCheckErrs(ctx context.Context, log *slog.Logger, err error) {
+	if errsI, ok := err.(interface{ Unwrap() []error }); ok {
+		for _, err := range errsI.Unwrap() {
+			if err, ok := errors.AsType[*reimage.ImageCheckError](err); ok && err != nil {
+				for _, cve := range slices.Sorted(maps.Keys(err.CVEs)) {
+					log.ErrorContext(
+						ctx,
+						"Unacceptable vulnerability",
+						slog.String("image", err.Image),
+						slog.String("cve", cve),
+						slog.Float64("cvss", float64(err.CVEs[cve].Score)),
+						slog.String("cve_desc", err.CVEs[cve].Desc),
+					)
+				}
+				continue
+			}
+
+			log.ErrorContext(ctx, fmt.Errorf("vulncheck failed, %w", err).Error())
+		}
+
+		return
+	}
+
+	log.ErrorContext(ctx, fmt.Errorf("vulncheck failed, %w", err).Error())
+}
+
 func main() {
 	ctx := context.Background()
 
@@ -653,27 +679,7 @@ func main() {
 
 	err = app.checkVulns(ctx, mappings)
 	if err != nil {
-		if errsI, ok := err.(interface{ Unwrap() []error }); ok {
-			for _, err := range errsI.Unwrap() {
-				if err, ok := errors.AsType[*reimage.ImageCheckError](err); ok && err != nil {
-					for _, cve := range slices.Sorted(maps.Keys(err.CVEs)) {
-						app.log.ErrorContext(
-							ctx,
-							"Unacceptable vulnerability",
-							slog.String("image", err.Image),
-							slog.String("cve", cve),
-							slog.Float64("cvss", float64(err.CVEs[cve].Score)),
-							slog.String("cve_desc", err.CVEs[cve].Desc),
-						)
-					}
-				} else {
-					app.log.ErrorContext(ctx, fmt.Errorf("vulncheck failed, %w", err).Error())
-				}
-			}
-		} else {
-			app.log.ErrorContext(ctx, fmt.Errorf("vulncheck failed, %w", err).Error())
-		}
-
+		logVulnCheckErrs(ctx, app.log, err)
 		os.Exit(1)
 	}
 
