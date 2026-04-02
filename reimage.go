@@ -12,11 +12,12 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"maps"
 	"net/http"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
-	"sync"
 	"text/template"
 
 	"github.com/AsaiYusuke/jsonpath"
@@ -888,24 +889,25 @@ type VulnGetter interface {
 type VulnChecker struct {
 	Getter VulnGetter
 	Logger
-	IgnoreImages  *regexp.Regexp
-	cveAllowList  map[string]struct{}
-	CVEIgnoreList []string
-	sync.Mutex
-	MaxCVSS float32
+	IgnoreImages    *regexp.Regexp
+	CVEIgnoreConfig *VulnCheckIgnoreCVESpec
+	MaxCVSS         float32
 }
 
 // ImageCheckError is returned by Check if unwanted vulnerabilities are found.
 type ImageCheckError struct {
-	CVEs    map[string]float32
+	CVEs map[string]struct {
+		Score float32
+		Desc  string
+	}
 	Image   string
 	MaxCVSS float32
 }
 
 func (ice *ImageCheckError) Error() string {
 	cvsStrs := []string{}
-	for cve, score := range ice.CVEs {
-		cvsStrs = append(cvsStrs, fmt.Sprintf("%s(%.2f)", cve, score))
+	for cve, data := range ice.CVEs {
+		cvsStrs = append(cvsStrs, fmt.Sprintf("%s(%.2f)", cve, data.Score))
 	}
 	sort.Strings(cvsStrs)
 
@@ -924,6 +926,7 @@ func (ice *ImageCheckError) Error() string {
 type ImageVulnerability struct {
 	ID   string
 	CVSS float32
+	Desc string
 }
 
 // VulnCheckResult is the result of a vulnerability check.
@@ -941,15 +944,6 @@ func (vc *VulnChecker) Check(ctx context.Context, dig name.Digest) (*VulnCheckRe
 		return &VulnCheckResult{}, nil
 	}
 
-	vc.Lock()
-	if vc.cveAllowList == nil {
-		vc.cveAllowList = map[string]struct{}{}
-		for _, str := range vc.CVEIgnoreList {
-			vc.cveAllowList[str] = struct{}{}
-		}
-	}
-	vc.Unlock()
-
 	res := VulnCheckResult{}
 	cves, err := vc.Getter.GetVulnerabilities(ctx, dig)
 	if err != nil {
@@ -960,19 +954,28 @@ func (vc *VulnChecker) Check(ctx context.Context, dig name.Digest) (*VulnCheckRe
 		return &res, nil
 	}
 
-	badCVEs := map[string]float32{}
+	badCVEs := map[string]struct {
+		Score float32
+		Desc  string
+	}{}
 	for _, cve := range cves {
 		score := cve.CVSS
-		cve := cve.ID
+		id := cve.ID
 		if score > vc.MaxCVSS {
-			if _, ok := vc.cveAllowList[cve]; ok {
-				res.Ignored = append(res.Ignored, fmt.Sprintf("%s:%f", cve, score))
+			if vc.CVEIgnoreConfig.IsIgnored(ctx, dig.Name(), id) {
+				res.Ignored = append(res.Ignored, fmt.Sprintf("%s:%f", id, score))
 				continue
 			}
-			badCVEs[cve] = score
+			badCVEs[id] = struct {
+				Score float32
+				Desc  string
+			}{
+				Score: score,
+				Desc:  cve.Desc,
+			}
 			continue
 		}
-		res.Found = append(res.Found, fmt.Sprintf("%s:%f", cve, score))
+		res.Found = append(res.Found, fmt.Sprintf("%s:%f", id, score))
 	}
 
 	if len(badCVEs) != 0 {
@@ -984,4 +987,65 @@ func (vc *VulnChecker) Check(ctx context.Context, dig name.Digest) (*VulnCheckRe
 	}
 
 	return &res, nil
+}
+
+type VulnCheckIgnoreCVESpec struct {
+	raw map[*regexp.Regexp][]string
+}
+
+func (f *VulnCheckIgnoreCVESpec) String() string {
+	if f.raw == nil {
+		return ""
+	}
+
+	keys := maps.Keys(f.raw)
+	var b strings.Builder
+	fmt.Fprintf(&b, "%s\n", strings.Join((f.raw)[nil], ","))
+	for k := range keys {
+		if k == nil {
+			continue
+		}
+		fmt.Fprintf(&b, "%s=%s\n", k, strings.Join(f.raw[k], ","))
+	}
+
+	return b.String()
+}
+
+// Set implements the flags.Var Set interface.
+func (f *VulnCheckIgnoreCVESpec) Set(value string) error {
+	if f.raw == nil {
+		f.raw = map[*regexp.Regexp][]string{}
+	}
+
+	l, r, ok := strings.Cut(value, "=")
+	if !ok {
+		f.raw[nil] = append(f.raw[nil], strings.Split(l, ",")...)
+		return nil
+	}
+
+	lre, err := regexp.Compile(l)
+	if err != nil {
+		return fmt.Errorf("bad regexp argument %q, %w", l, err)
+	}
+
+	f.raw[lre] = append(f.raw[lre], strings.Split(r, ",")...)
+
+	return nil
+}
+
+func (f *VulnCheckIgnoreCVESpec) IsIgnored(_ context.Context, img, cve string) bool {
+	for rxp, igns := range f.raw {
+		if rxp == nil {
+			if slices.Contains(igns, cve) {
+				return true
+			}
+			continue
+		}
+		if rxp.MatchString(img) {
+			if slices.Contains(igns, cve) {
+				return true
+			}
+		}
+	}
+	return false
 }
