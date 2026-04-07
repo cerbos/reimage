@@ -16,6 +16,7 @@ import (
 	"log/slog"
 	"maps"
 	"os"
+	"os/exec"
 	"regexp"
 	"slices"
 	"strings"
@@ -122,7 +123,7 @@ func setup(ctx context.Context) (*app, error) {
 
 	flag.StringVar(&a.GrafeasParent, "grafeas-parent", "", "value for the parent of the grafeas client (e.g. \"project/my-project-id\" for GCP")
 
-	flag.StringVar(&a.VulnCheckCommand, "vulncheck-command", "grype -q --by-cve -o json", "the command to run to retrieve vulnerability scans in trivy's JSON format (the image id will be added as an additional arg")
+	flag.StringVar(&a.VulnCheckCommand, "vulncheck-command", "grype --by-cve -o json", "the command to run to retrieve vulnerability scans in trivy's JSON format (the image id will be added as an additional arg")
 	flag.StringVar(&a.VulnCheckFormat, "vulncheck-format", "grype-json", fmt.Sprintf("the output format of the vulncheck-command (%s)", strings.Join(reimage.VulnOutputFormats, ",")))
 
 	flag.StringVar(&a.BinAuthzAttestor, "binauthz-attestor", "", "Google BinAuthz Attestor (e.g. projects/myproj/attestors/myattestor)")
@@ -465,7 +466,7 @@ func (a *app) checkVulns(ctx context.Context, imgs map[string]reimage.QualifiedI
 
 			cres, err := checker.Check(vcCtx, dig)
 			if err != nil {
-				errs[i] = fmt.Errorf("image check failed %q, %w", img, err)
+				errs[i] = fmt.Errorf("image check failed %q, %w", img.Tag, err)
 				return
 			}
 
@@ -606,6 +607,23 @@ func logVulnCheckErrs(ctx context.Context, log *slog.Logger, err error) {
 						slog.String("cve_desc", err.CVEs[cve].Desc),
 					)
 				}
+				continue
+			}
+			if err, ok := errors.AsType[*reimage.ExecVulncheckCommandError](err); ok && err != nil {
+				attrs := []any{
+					slog.String("err", err.Error()),
+					slog.String("image", err.Image),
+					slog.String("cmd", strings.Join(err.Command, " ")),
+				}
+				if execErr, ok := err.Err.(*exec.ExitError); ok {
+					attrs = append(attrs, slog.String("stderr", string(execErr.Stderr)))
+				}
+
+				log.ErrorContext(
+					ctx,
+					"vulncheck exec failed",
+					attrs...,
+				)
 				continue
 			}
 

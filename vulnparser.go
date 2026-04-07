@@ -92,6 +92,20 @@ func (tr *grypeJSONReport) ParseReport() ([]ImageVulnerability, error) {
 	return res, nil
 }
 
+type ExecVulncheckCommandError struct {
+	Image   string
+	Command []string
+	Err     error
+}
+
+func (eve *ExecVulncheckCommandError) Error() string {
+	return fmt.Sprintf("failed check of %s, %s", eve.Image, eve.Err.Error())
+}
+
+func (eve *ExecVulncheckCommandError) Unwrap() error {
+	return eve.Err
+}
+
 type ExecVulnGetter struct {
 	Command   []string
 	OutFormat string
@@ -105,7 +119,11 @@ func (vc *ExecVulnGetter) GetVulnerabilities(ctx context.Context, dig name.Diges
 	cmd := exec.CommandContext(ctx, vc.Command[0], args...)
 	bs, err := cmd.Output()
 	if err != nil {
-		return nil, err
+		return nil, &ExecVulncheckCommandError{
+			Image:   dig.Name(),
+			Command: append([]string{vc.Command[0]}, args...),
+			Err:     err,
+		}
 	}
 
 	type parser interface {
