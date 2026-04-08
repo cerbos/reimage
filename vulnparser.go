@@ -8,11 +8,22 @@ import (
 	"encoding/json"
 	"fmt"
 	"os/exec"
+	"strings"
 
 	"github.com/google/go-containerregistry/pkg/name"
 )
 
 var VulnOutputFormats = []string{"trivy-json", "grype-json"}
+
+type InvalidVulncheckOutputFormatError string
+
+func (e InvalidVulncheckOutputFormatError) Error() string {
+	return fmt.Sprintf(
+		"invalid vulncheck output format %q, (should be one of %s)",
+		string(e),
+		strings.Join(VulnOutputFormats, ","),
+	)
+}
 
 // trivyJSONReport parses the JSON output of trivy -o json.
 type trivyJSONReport struct {
@@ -92,22 +103,26 @@ func (tr *grypeJSONReport) ParseReport() ([]ImageVulnerability, error) {
 	return res, nil
 }
 
+type ExecVulncheckCommandError struct {
+	Image   string
+	Command []string
+	Err     error
+}
+
+func (eve *ExecVulncheckCommandError) Error() string {
+	return fmt.Sprintf("failed check of %s, %s", eve.Image, eve.Err.Error())
+}
+
+func (eve *ExecVulncheckCommandError) Unwrap() error {
+	return eve.Err
+}
+
 type ExecVulnGetter struct {
 	Command   []string
 	OutFormat string
 }
 
 func (vc *ExecVulnGetter) GetVulnerabilities(ctx context.Context, dig name.Digest) ([]ImageVulnerability, error) {
-	args := vc.Command[1:]
-	args = append(args, dig.String())
-
-	//nolint:gosec
-	cmd := exec.CommandContext(ctx, vc.Command[0], args...)
-	bs, err := cmd.Output()
-	if err != nil {
-		return nil, err
-	}
-
 	type parser interface {
 		ParseReport() ([]ImageVulnerability, error)
 	}
@@ -120,7 +135,21 @@ func (vc *ExecVulnGetter) GetVulnerabilities(ctx context.Context, dig name.Diges
 	case "grype-json":
 		tr = &grypeJSONReport{}
 	default:
-		return nil, fmt.Errorf("unknown vulnerability scanner output format %q", vc.OutFormat)
+		return nil, InvalidVulncheckOutputFormatError(vc.OutFormat)
+	}
+
+	args := vc.Command[1:]
+	args = append(args, dig.String())
+
+	//nolint:gosec
+	cmd := exec.CommandContext(ctx, vc.Command[0], args...)
+	bs, err := cmd.Output()
+	if err != nil {
+		return nil, &ExecVulncheckCommandError{
+			Image:   dig.Name(),
+			Command: append([]string{vc.Command[0]}, args...),
+			Err:     err,
+		}
 	}
 
 	err = json.Unmarshal(bs, tr)

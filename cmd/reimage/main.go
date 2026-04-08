@@ -16,6 +16,7 @@ import (
 	"log/slog"
 	"maps"
 	"os"
+	"os/exec"
 	"regexp"
 	"slices"
 	"strings"
@@ -122,7 +123,7 @@ func setup(ctx context.Context) (*app, error) {
 
 	flag.StringVar(&a.GrafeasParent, "grafeas-parent", "", "value for the parent of the grafeas client (e.g. \"project/my-project-id\" for GCP")
 
-	flag.StringVar(&a.VulnCheckCommand, "vulncheck-command", "grype -q --by-cve -o json", "the command to run to retrieve vulnerability scans in trivy's JSON format (the image id will be added as an additional arg")
+	flag.StringVar(&a.VulnCheckCommand, "vulncheck-command", "grype --by-cve -o json", "the command to run to retrieve vulnerability scans in trivy's JSON format (the image id will be added as an additional arg")
 	flag.StringVar(&a.VulnCheckFormat, "vulncheck-format", "grype-json", fmt.Sprintf("the output format of the vulncheck-command (%s)", strings.Join(reimage.VulnOutputFormats, ",")))
 
 	flag.StringVar(&a.BinAuthzAttestor, "binauthz-attestor", "", "Google BinAuthz Attestor (e.g. projects/myproj/attestors/myattestor)")
@@ -154,7 +155,7 @@ func setup(ctx context.Context) (*app, error) {
 	}
 
 	if !slices.Contains(reimage.VulnOutputFormats, a.VulnCheckFormat) {
-		return &a, fmt.Errorf("unknown vulnerability command output format %q", a.VulnCheckFormat)
+		return &a, reimage.InvalidVulncheckOutputFormatError(a.VulnCheckFormat)
 	}
 
 	// What follows is horrid, and probably a sign of some abstraction breakdown
@@ -465,7 +466,7 @@ func (a *app) checkVulns(ctx context.Context, imgs map[string]reimage.QualifiedI
 
 			cres, err := checker.Check(vcCtx, dig)
 			if err != nil {
-				errs[i] = fmt.Errorf("image check failed %q, %w", img, err)
+				errs[i] = fmt.Errorf("image check failed %q, %w", img.Tag, err)
 				return
 			}
 
@@ -484,6 +485,11 @@ func (a *app) checkVulns(ctx context.Context, imgs map[string]reimage.QualifiedI
 	for _, err := range errs {
 		if errors.Is(err, context.Canceled) {
 			// if there are any context cancelled errors, we'll just return one
+			// directly
+			return err
+		}
+		if _, ok := errors.AsType[reimage.InvalidVulncheckOutputFormatError](err); ok {
+			// if the vulcheck output format was invalid, just return that once
 			// directly
 			return err
 		}
@@ -606,6 +612,24 @@ func logVulnCheckErrs(ctx context.Context, log *slog.Logger, err error) {
 						slog.String("cve_desc", err.CVEs[cve].Desc),
 					)
 				}
+				continue
+			}
+			if err, ok := errors.AsType[*reimage.ExecVulncheckCommandError](err); ok && err != nil {
+				attrs := []any{
+					slog.String("err", err.Error()),
+					slog.String("image", err.Image),
+					slog.String("cmd", strings.Join(err.Command, " ")),
+				}
+				execErr := &exec.ExitError{}
+				if errors.As(err.Err, &execErr) {
+					attrs = append(attrs, slog.String("stderr", string(execErr.Stderr)))
+				}
+
+				log.ErrorContext(
+					ctx,
+					"vulncheck exec failed",
+					attrs...,
+				)
 				continue
 			}
 
