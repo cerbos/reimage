@@ -155,7 +155,7 @@ func setup(ctx context.Context) (*app, error) {
 	}
 
 	if !slices.Contains(reimage.VulnOutputFormats, a.VulnCheckFormat) {
-		return &a, fmt.Errorf("unknown vulnerability command output format %q", a.VulnCheckFormat)
+		return &a, reimage.InvalidVulncheckOutputFormatError(a.VulnCheckFormat)
 	}
 
 	// What follows is horrid, and probably a sign of some abstraction breakdown
@@ -488,6 +488,11 @@ func (a *app) checkVulns(ctx context.Context, imgs map[string]reimage.QualifiedI
 			// directly
 			return err
 		}
+		if _, ok := errors.AsType[reimage.InvalidVulncheckOutputFormatError](err); ok {
+			// if the vulcheck output format was invalid, just return that once
+			// directly
+			return err
+		}
 	}
 
 	maps.Copy(imgs, res)
@@ -615,7 +620,8 @@ func logVulnCheckErrs(ctx context.Context, log *slog.Logger, err error) {
 					slog.String("image", err.Image),
 					slog.String("cmd", strings.Join(err.Command, " ")),
 				}
-				if execErr, ok := err.Err.(*exec.ExitError); ok {
+				execErr := &exec.ExitError{}
+				if errors.As(err.Err, &execErr) {
 					attrs = append(attrs, slog.String("stderr", string(execErr.Stderr)))
 				}
 
