@@ -20,7 +20,9 @@ import (
 	"strings"
 	"text/template"
 
-	"github.com/AsaiYusuke/jsonpath"
+	"github.com/AsaiYusuke/jsonpath/v2"
+	jpconfig "github.com/AsaiYusuke/jsonpath/v2/config"
+	jperrors "github.com/AsaiYusuke/jsonpath/v2/errors"
 	"github.com/google/go-containerregistry/pkg/crane"
 	"github.com/google/go-containerregistry/pkg/name"
 	"github.com/google/go-containerregistry/pkg/v1/remote/transport"
@@ -746,7 +748,7 @@ func ProcessRawYAML(w io.Writer, r io.Reader, u Updater) error {
 	return nil
 }
 
-type jsonPathFunc func(src any) ([]any, error)
+type jsonPathFunc func(src any, dst ...*[]any) ([]any, error)
 
 // JSONImageFinderConfig describes the settings for finding
 // arbitrary image fields in K8S types.
@@ -788,7 +790,7 @@ func (jm jsonImageFinder) FindImages(obj any) (map[string]ImageSetters, error) {
 	for _, jpf := range jm.imageJSONPFns {
 		vs, err := jpf(obj)
 		if err != nil {
-			var jErr jsonpath.ErrorMemberNotExist
+			var jErr jperrors.ErrorMemberNotExist
 			if errors.As(err, &jErr) {
 				continue
 			}
@@ -796,7 +798,7 @@ func (jm jsonImageFinder) FindImages(obj any) (map[string]ImageSetters, error) {
 		}
 
 		for i := range vs {
-			accessor, _ := vs[i].(jsonpath.Accessor)
+			accessor, _ := vs[i].(jpconfig.Accessor)
 			imgI := accessor.Get()
 			imgStr, ok := imgI.(string)
 			if !ok {
@@ -849,7 +851,7 @@ func compileJSONImageFinder(cfg JSONImageFinderConfig) (*jsonImageFinder, error)
 		}
 	}
 
-	config := jsonpath.Config{}
+	config := jpconfig.Config{}
 	config.SetAccessorMode()
 
 	for _, jsonpStr := range cfg.ImageJSONP {
