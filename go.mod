@@ -6,7 +6,7 @@ require (
 	cloud.google.com/go/containeranalysis v0.17.0
 	cloud.google.com/go/grafeas v0.5.0
 	cloud.google.com/go/kms v1.29.0
-	github.com/AsaiYusuke/jsonpath v1.6.0
+	github.com/AsaiYusuke/jsonpath/v2 v2.2.0
 	github.com/buildkite/shellwords v1.0.1
 	github.com/google/go-containerregistry v0.21.5
 	github.com/googleapis/gax-go/v2 v2.22.0
