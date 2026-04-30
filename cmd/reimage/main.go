@@ -294,6 +294,11 @@ func (a *app) readStaticMappings(confirmDigests bool) (*reimage.StaticRemapper, 
 }
 
 func (a *app) writeMappings(ctx context.Context, mappings map[string]reimage.QualifiedImage) (err error) {
+	if a.WriteMappings == "" && a.WriteMappingsImg == "" {
+		a.log.DebugContext(ctx, "skipping writing of mappings, no location requested")
+		return nil
+	}
+
 	bs, err := json.Marshal(mappings)
 	if err != nil {
 		return fmt.Errorf("could not marshal mappings, %w", err)
@@ -304,7 +309,6 @@ func (a *app) writeMappings(ctx context.Context, mappings map[string]reimage.Qua
 		return nil
 	}
 
-	a.log.InfoContext(ctx, "writing mappings file", "file", a.WriteMappings)
 	if a.WriteMappings != "" {
 		a.log.InfoContext(ctx, "writing mappings file", "file", a.WriteMappings)
 		err = os.WriteFile(a.WriteMappings, bs, defaultFSMask)
@@ -314,6 +318,7 @@ func (a *app) writeMappings(ctx context.Context, mappings map[string]reimage.Qua
 	}
 
 	if a.WriteMappingsImg != "" {
+		a.log.InfoContext(ctx, "writing mappings image", "file", a.WriteMappingsImg)
 		cnt := map[string][]byte{
 			"reimage-mapping.json": bs,
 		}
