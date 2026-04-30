@@ -271,14 +271,21 @@ func needsUpdate(newRef name.Reference, old name.Digest, log Logger) (bool, erro
 	return true, nil
 }
 
+type CVE struct {
+	ID   string
+	CVSS float32
+	Risk float32
+	Desc string
+}
+
 // QualifiedImage describes an image tag, at a specific digest.
 //
 //nolint:tagliatelle
 type QualifiedImage struct {
-	Tag         string   `json:"tag"`
-	Digest      string   `json:"digest"`
-	IgnoredCVEs []string `json:"ignoredCVEs,omitempty"`
-	FoundCVEs   []string `json:"foundCVEs,omitempty"`
+	Tag         string `json:"tag"`
+	Digest      string `json:"digest"`
+	IgnoredCVEs []CVE  `json:"ignoredCVEs,omitempty"`
+	FoundCVEs   []CVE  `json:"foundCVEs,omitempty"`
 }
 
 // StaticRemapper is a Remapper implementation that allows statically mapping
@@ -883,7 +890,7 @@ func CompileJSONImageFinders(jmCfgs []JSONImageFinderConfig) (ImagesFinder, erro
 // VulnGetter is an interface to any tool that can retrieve vulnerabilities for
 // a given docker image digest.
 type VulnGetter interface {
-	GetVulnerabilities(ctx context.Context, dig name.Digest) ([]ImageVulnerability, error)
+	GetVulnerabilities(ctx context.Context, dig name.Digest) ([]CVE, error)
 }
 
 // VulnChecker checks that images have been scanned, and checks that
@@ -894,22 +901,21 @@ type VulnChecker struct {
 	IgnoreImages    *regexp.Regexp
 	CVEIgnoreConfig *VulnCheckIgnoreCVESpec
 	MaxCVSS         float32
+	MaxRisk         float32
 }
 
 // ImageCheckError is returned by Check if unwanted vulnerabilities are found.
 type ImageCheckError struct {
-	CVEs map[string]struct {
-		Score float32
-		Desc  string
-	}
+	CVEs    map[string]CVE
 	Image   string
 	MaxCVSS float32
+	MaxRisk float32
 }
 
 func (ice *ImageCheckError) Error() string {
 	cvsStrs := []string{}
 	for cve, data := range ice.CVEs {
-		cvsStrs = append(cvsStrs, fmt.Sprintf("%s(%.2f)", cve, data.Score))
+		cvsStrs = append(cvsStrs, fmt.Sprintf("%s(cvss:%.2f)(risk:%.2f)", cve, data.CVSS, data.Risk))
 	}
 	sort.Strings(cvsStrs)
 
@@ -924,17 +930,10 @@ func (ice *ImageCheckError) Error() string {
 	return str
 }
 
-// ImageVulnerability describes a given CVE by ID and score.
-type ImageVulnerability struct {
-	ID   string
-	CVSS float32
-	Desc string
-}
-
 // VulnCheckResult is the result of a vulnerability check.
 type VulnCheckResult struct {
-	Ignored []string // CVEs that were present, but explicitly ignored by the checker.
-	Found   []string // CVEs that were present, but under the max requested CVSS.
+	Ignored []CVE // CVEs that were present, but explicitly ignored by the checker.
+	Found   []CVE // CVEs that were present, but under the max requested CVSS.
 }
 
 // Check waits for a completed vulnerability discovery, and then check that an image
@@ -952,32 +951,24 @@ func (vc *VulnChecker) Check(ctx context.Context, dig name.Digest) (*VulnCheckRe
 		return nil, err
 	}
 
-	if vc.MaxCVSS == 0 {
+	if vc.MaxCVSS == 0 && vc.MaxRisk == 0 {
 		return &res, nil
 	}
 
-	badCVEs := map[string]struct {
-		Score float32
-		Desc  string
-	}{}
+	badCVEs := map[string]CVE{}
 	for _, cve := range cves {
 		score := cve.CVSS
+		risk := cve.Risk
 		id := cve.ID
-		if score > vc.MaxCVSS {
+		if (vc.MaxCVSS != 0 && score > vc.MaxCVSS) || (vc.MaxRisk > 0 && risk > vc.MaxRisk) {
 			if vc.CVEIgnoreConfig.IsIgnored(ctx, dig.Name(), id) {
-				res.Ignored = append(res.Ignored, fmt.Sprintf("%s:%f", id, score))
+				res.Ignored = append(res.Ignored, cve)
 				continue
 			}
-			badCVEs[id] = struct {
-				Score float32
-				Desc  string
-			}{
-				Score: score,
-				Desc:  cve.Desc,
-			}
+			badCVEs[id] = cve
 			continue
 		}
-		res.Found = append(res.Found, fmt.Sprintf("%s:%f", id, score))
+		res.Found = append(res.Found, cve)
 	}
 
 	if len(badCVEs) != 0 {

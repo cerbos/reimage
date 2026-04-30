@@ -38,8 +38,8 @@ type trivyJSONReport struct {
 	}
 }
 
-func (tr *trivyJSONReport) ParseReport() ([]ImageVulnerability, error) {
-	var res []ImageVulnerability
+func (tr *trivyJSONReport) ParseReport() ([]CVE, error) {
+	var res []CVE
 	for _, r := range tr.Results {
 		for _, v := range r.Vulnerabilities {
 			score := float32(0.0)
@@ -55,9 +55,10 @@ func (tr *trivyJSONReport) ParseReport() ([]ImageVulnerability, error) {
 					score = s
 				}
 			}
-			res = append(res, ImageVulnerability{
+			res = append(res, CVE{
 				ID:   v.VulnerabilityID,
 				CVSS: score,
+				// add grype style CVE Risk logic,
 			})
 		}
 	}
@@ -76,27 +77,30 @@ type grypeJSONReport struct {
 			}
 			ID          string
 			Description string
+			Risk        float32
 		}
 	}
 }
 
-func (tr *grypeJSONReport) ParseReport() ([]ImageVulnerability, error) {
-	var res []ImageVulnerability
+func (tr *grypeJSONReport) ParseReport() ([]CVE, error) {
+	var res []CVE
 	for _, r := range tr.Matches {
 		v := r.Vulnerability
 		score := float32(0.0)
 		if len(v.CVSS) == 0 {
 			score = 5.0 // Default to 5.0 if no CVSS are provided, grype does this
 		}
+		risk := v.Risk
 		for _, cv := range v.CVSS {
 			s := cv.Metrics.BaseScore
 			if s > score {
 				score = s
 			}
 		}
-		res = append(res, ImageVulnerability{
+		res = append(res, CVE{
 			ID:   v.ID,
 			CVSS: score,
+			Risk: risk,
 			Desc: v.Description,
 		})
 	}
@@ -122,9 +126,9 @@ type ExecVulnGetter struct {
 	OutFormat string
 }
 
-func (vc *ExecVulnGetter) GetVulnerabilities(ctx context.Context, dig name.Digest) ([]ImageVulnerability, error) {
+func (vc *ExecVulnGetter) GetVulnerabilities(ctx context.Context, dig name.Digest) ([]CVE, error) {
 	type parser interface {
-		ParseReport() ([]ImageVulnerability, error)
+		ParseReport() ([]CVE, error)
 	}
 
 	var tr parser

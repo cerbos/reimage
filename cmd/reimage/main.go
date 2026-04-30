@@ -72,6 +72,7 @@ type app struct {
 	VulnCheckFormat        string
 	VulnCheckIgnoreCVESpec *reimage.VulnCheckIgnoreCVESpec
 	VulnCheckMaxCVSS       float64
+	VulnCheckMaxRisk       float64
 	VulnCheckTimeout       time.Duration
 	VulnCheckMaxRetries    int
 	Version                bool
@@ -118,6 +119,7 @@ func setup(ctx context.Context) (*app, error) {
 	flag.IntVar(&a.VulnCheckMaxRetries, "vulncheck-max-retries", defaultVulcheckRetries, "max number of attempts to check for vulnerabilitie")
 	flag.Var(a.VulnCheckIgnoreCVESpec, "vulncheck-ignore-cve-list", "comma separated list of vulnerabilities to ignore")
 	flag.Float64Var(&a.VulnCheckMaxCVSS, "vulncheck-max-cvss", 0.0, "maximum CVSS vulnerabitility score")
+	flag.Float64Var(&a.VulnCheckMaxRisk, "vulncheck-max-risk", 0.0, "maximum vulnerabitility risk score")
 	flag.StringVar(&a.VulnCheckIgnoreImages, "vulncheck-ignore-images", "", "regexp of images to skip for CVE checks")
 	flag.StringVar(&a.VulnCheckMethod, "vulncheck-method", "exec", "force the vulnerability check method, (exec or grafeas)")
 
@@ -405,8 +407,8 @@ func (a *app) buildRemapper(checkDigests bool) (reimage.Remapper, *reimage.Recor
 
 // checkVulns most of this should move into the main package.
 func (a *app) checkVulns(ctx context.Context, imgs map[string]reimage.QualifiedImage) error {
-	if a.VulnCheckMaxCVSS == 0 {
-		a.log.InfoContext(ctx, "skipping vulnerability checks (max CVSS is set to 0)")
+	if a.VulnCheckMaxCVSS == 0 && a.VulnCheckMaxRisk == 0 {
+		a.log.InfoContext(ctx, "skipping vulnerability checks (max CVSS and risk are set to 0)")
 		return nil
 	}
 
@@ -446,6 +448,7 @@ func (a *app) checkVulns(ctx context.Context, imgs map[string]reimage.QualifiedI
 		Getter:          vget,
 		IgnoreImages:    a.vulnCheckIgnoreImages,
 		MaxCVSS:         float32(a.VulnCheckMaxCVSS),
+		MaxRisk:         float32(a.VulnCheckMaxRisk),
 		CVEIgnoreConfig: a.VulnCheckIgnoreCVESpec,
 	}
 
@@ -604,18 +607,19 @@ func (a *app) attestImages(ctx context.Context, imgs map[string]reimage.Qualifie
 }
 
 func logVulnCheckErrs(ctx context.Context, log *slog.Logger, err error) {
+	type cveInst struct {
+		CVE   reimage.CVE
+		Image string
+	}
+	ices := map[string][]cveInst{}
 	if errsI, ok := err.(interface{ Unwrap() []error }); ok {
 		for _, err := range errsI.Unwrap() {
 			if err, ok := errors.AsType[*reimage.ImageCheckError](err); ok && err != nil {
-				for _, cve := range slices.Sorted(maps.Keys(err.CVEs)) {
-					log.ErrorContext(
-						ctx,
-						"Unacceptable vulnerability",
-						slog.String("image", err.Image),
-						slog.String("cve", cve),
-						slog.Float64("cvss", float64(err.CVEs[cve].Score)),
-						slog.String("cve_desc", err.CVEs[cve].Desc),
-					)
+				for id, cve := range err.CVEs {
+					ices[id] = append(ices[id], cveInst{
+						Image: err.Image,
+						CVE:   cve,
+					})
 				}
 				continue
 			}
@@ -641,6 +645,41 @@ func logVulnCheckErrs(ctx context.Context, log *slog.Logger, err error) {
 			log.ErrorContext(ctx, fmt.Errorf("vulncheck failed, %w", err).Error())
 		}
 
+		if len(ices) > 0 {
+			for id, instances := range ices {
+				var imgs []string
+				var desc string
+				var cvss, risk float32
+				for _, inst := range instances {
+					imgs = append(imgs, inst.Image)
+					if len(desc) < len(inst.CVE.Desc) {
+						desc = inst.CVE.Desc
+					}
+					if cvss < inst.CVE.CVSS {
+						cvss = inst.CVE.CVSS
+					}
+					if risk < inst.CVE.Risk {
+						risk = inst.CVE.Risk
+					}
+				}
+
+				args := []any{
+					slog.String("cve", id),
+					slog.Float64("cvss", float64(cvss)),
+					slog.Float64("risk", float64(risk)),
+					slog.String("cve_desc", desc),
+					slog.String("images", strings.Join(imgs, ",")),
+				}
+				log.ErrorContext(
+					ctx,
+					"Unacceptable vulnerability",
+					args...,
+				)
+			}
+			return
+		}
+
+		//  we can write a more user friendly error report out here
 		return
 	}
 
