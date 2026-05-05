@@ -646,7 +646,8 @@ func logVulnCheckErrs(ctx context.Context, log *slog.Logger, err error) {
 		}
 
 		if len(ices) > 0 {
-			for id, instances := range ices {
+			for _, id := range slices.Sorted(maps.Keys(ices)) {
+				instances := ices[id]
 				var imgs []string
 				var desc string
 				var cvss, risk float32
