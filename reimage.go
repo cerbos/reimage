@@ -16,7 +16,6 @@ import (
 	"net/http"
 	"regexp"
 	"slices"
-	"sort"
 	"strings"
 	"text/template"
 
@@ -278,14 +277,25 @@ type CVE struct {
 	Desc string
 }
 
+type RejectedCVE struct {
+	CVE
+	Reason string
+}
+
+// VulnCheckResult is the result of a vulnerability check.
+type VulnCheckResult struct {
+	Ignored  []CVE         // CVEs that were present, but explicitly ignored by the checker.
+	Accepted []CVE         // CVEs that were present, but accepted by the CVE constraints.
+	Rejected []RejectedCVE // CVEs that were present and rejected  by the CVE constratins.
+}
+
 // QualifiedImage describes an image tag, at a specific digest.
 //
 //nolint:tagliatelle
 type QualifiedImage struct {
-	Tag         string `json:"tag"`
-	Digest      string `json:"digest"`
-	IgnoredCVEs []CVE  `json:"ignoredCVEs,omitempty"`
-	FoundCVEs   []CVE  `json:"foundCVEs,omitempty"`
+	Tag             string          `json:"tag"`
+	Digest          string          `json:"digest"`
+	VulnCheckResult VulnCheckResult `json:"vulncheckResult"`
 }
 
 // StaticRemapper is a Remapper implementation that allows statically mapping
@@ -904,38 +914,6 @@ type VulnChecker struct {
 	MaxRisk         float32
 }
 
-// ImageCheckError is returned by Check if unwanted vulnerabilities are found.
-type ImageCheckError struct {
-	CVEs    map[string]CVE
-	Image   string
-	MaxCVSS float32
-	MaxRisk float32
-}
-
-func (ice *ImageCheckError) Error() string {
-	cvsStrs := []string{}
-	for cve, data := range ice.CVEs {
-		cvsStrs = append(cvsStrs, fmt.Sprintf("%s(cvss:%.2f)(risk:%.2f)", cve, data.CVSS, data.Risk))
-	}
-	sort.Strings(cvsStrs)
-
-	str := fmt.Sprintf(
-		"image %s has %d CVEs with score > %.2f: %s",
-		ice.Image,
-		len(ice.CVEs),
-		ice.MaxCVSS,
-		strings.Join(cvsStrs, ","),
-	)
-
-	return str
-}
-
-// VulnCheckResult is the result of a vulnerability check.
-type VulnCheckResult struct {
-	Ignored []CVE // CVEs that were present, but explicitly ignored by the checker.
-	Found   []CVE // CVEs that were present, but under the max requested CVSS.
-}
-
 // Check waits for a completed vulnerability discovery, and then check that an image
 // has no CVEs that violate the configured policy.
 func (vc *VulnChecker) Check(ctx context.Context, dig name.Digest) (*VulnCheckResult, error) {
@@ -955,7 +933,6 @@ func (vc *VulnChecker) Check(ctx context.Context, dig name.Digest) (*VulnCheckRe
 		return &res, nil
 	}
 
-	badCVEs := map[string]CVE{}
 	for _, cve := range cves {
 		score := cve.CVSS
 		risk := cve.Risk
@@ -965,18 +942,15 @@ func (vc *VulnChecker) Check(ctx context.Context, dig name.Digest) (*VulnCheckRe
 				res.Ignored = append(res.Ignored, cve)
 				continue
 			}
-			badCVEs[id] = cve
+			res.Rejected = append(
+				res.Rejected,
+				RejectedCVE{
+					CVE:    cve,
+					Reason: "CVE risk/score is above request thresholds",
+				})
 			continue
 		}
-		res.Found = append(res.Found, cve)
-	}
-
-	if len(badCVEs) != 0 {
-		return nil, &ImageCheckError{
-			Image:   dig.Name(),
-			MaxCVSS: vc.MaxCVSS,
-			CVEs:    badCVEs,
-		}
+		res.Accepted = append(res.Accepted, cve)
 	}
 
 	return &res, nil
@@ -1041,4 +1015,14 @@ func (f *VulnCheckIgnoreCVESpec) IsIgnored(_ context.Context, img, cve string) b
 		}
 	}
 	return false
+}
+
+func (f *VulnCheckIgnoreCVESpec) AllCVEs() []string {
+	var allCVEs []string
+	for vs := range maps.Values(f.raw) {
+		allCVEs = append(allCVEs, vs...)
+	}
+	slices.Sort(allCVEs)
+
+	return slices.Compact(allCVEs)
 }

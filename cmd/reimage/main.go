@@ -466,7 +466,7 @@ func (a *app) checkVulns(ctx context.Context, imgs map[string]reimage.QualifiedI
 			a.log.DebugContext(ctx, "start checks on", "img", img.Tag)
 			ref, err := name.ParseReference(img.Tag)
 			if err != nil {
-				errs[i] = fmt.Errorf("could not parse ref %q, %w", img, err)
+				errs[i] = fmt.Errorf("could not parse ref %q, %w", img.Tag, err)
 				return
 			}
 
@@ -480,8 +480,9 @@ func (a *app) checkVulns(ctx context.Context, imgs map[string]reimage.QualifiedI
 
 			resLock.Lock()
 			defer resLock.Unlock()
-			img.FoundCVEs = cres.Found
-			img.IgnoredCVEs = cres.Ignored
+			img.VulnCheckResult.Accepted = cres.Accepted
+			img.VulnCheckResult.Ignored = cres.Ignored
+			img.VulnCheckResult.Rejected = cres.Rejected
 			res[src] = img
 		}(src, img, i)
 
@@ -568,7 +569,7 @@ func (a *app) attestImages(ctx context.Context, imgs map[string]reimage.Qualifie
 	for _, img := range imgs {
 		ref, ierr := name.ParseReference(img.Tag)
 		if ierr != nil {
-			errs[i] = fmt.Errorf("could not parse ref %q, %w", img, ierr)
+			errs[i] = fmt.Errorf("could not parse ref %q, %w", img.Tag, ierr)
 			continue
 		}
 
@@ -606,85 +607,104 @@ func (a *app) attestImages(ctx context.Context, imgs map[string]reimage.Qualifie
 	return errors.Join(errs...)
 }
 
-func logVulnCheckErrs(ctx context.Context, log *slog.Logger, err error) {
+func reportUnusedIgnores(ctx context.Context, log *slog.Logger, unused []string) {
+	if len(unused) == 0 {
+		return
+	}
+	log.InfoContext(
+		ctx,
+		"unused CVE ignores",
+		slog.String("cves", strings.Join(unused, ", ")),
+	)
+}
+
+func findUnusedIgnores(spec *reimage.VulnCheckIgnoreCVESpec, mappings map[string]reimage.QualifiedImage) []string {
+	usedIgnores := map[string]struct{}{}
+
+	for _, qi := range mappings {
+		for _, ii := range qi.VulnCheckResult.Ignored {
+			usedIgnores[ii.ID] = struct{}{}
+		}
+	}
+
+	var unusedIgnores []string
+	for _, id := range spec.AllCVEs() {
+		if _, ok := usedIgnores[id]; ok {
+			continue
+		}
+		unusedIgnores = append(unusedIgnores, id)
+	}
+
+	return unusedIgnores
+}
+
+func reportVulnCheckResult(ctx context.Context, log *slog.Logger, vcis *reimage.VulnCheckIgnoreCVESpec, mappings map[string]reimage.QualifiedImage) error {
 	type cveInst struct {
 		CVE   reimage.CVE
 		Image string
 	}
-	ices := map[string][]cveInst{}
-	if errsI, ok := err.(interface{ Unwrap() []error }); ok {
-		for _, err := range errsI.Unwrap() {
-			if err, ok := errors.AsType[*reimage.ImageCheckError](err); ok && err != nil {
-				for id, cve := range err.CVEs {
-					ices[id] = append(ices[id], cveInst{
-						Image: err.Image,
-						CVE:   cve,
-					})
-				}
-				continue
-			}
-			if err, ok := errors.AsType[*reimage.ExecVulncheckCommandError](err); ok && err != nil {
-				attrs := []any{
-					slog.String("err", err.Error()),
-					slog.String("image", err.Image),
-					slog.String("cmd", strings.Join(err.Command, " ")),
-				}
-				execErr := &exec.ExitError{}
-				if errors.As(err.Err, &execErr) {
-					attrs = append(attrs, slog.String("stderr", string(execErr.Stderr)))
-				}
 
-				log.ErrorContext(
-					ctx,
-					"vulncheck exec failed",
-					attrs...,
-				)
-				continue
-			}
-
-			log.ErrorContext(ctx, fmt.Errorf("vulncheck failed, %w", err).Error())
-		}
-
-		if len(ices) > 0 {
-			for _, id := range slices.Sorted(maps.Keys(ices)) {
-				instances := ices[id]
-				var imgs []string
-				var desc string
-				var cvss, risk float32
-				for _, inst := range instances {
-					imgs = append(imgs, inst.Image)
-					if len(desc) < len(inst.CVE.Desc) {
-						desc = inst.CVE.Desc
-					}
-					if cvss < inst.CVE.CVSS {
-						cvss = inst.CVE.CVSS
-					}
-					if risk < inst.CVE.Risk {
-						risk = inst.CVE.Risk
-					}
-				}
-
-				args := []any{
-					slog.String("cve", id),
-					slog.Float64("cvss", float64(cvss)),
-					slog.Float64("risk", float64(risk)),
-					slog.String("cve_desc", desc),
-					slog.String("images", strings.Join(imgs, ",")),
-				}
-				log.ErrorContext(
-					ctx,
-					"Unacceptable vulnerability",
-					args...,
-				)
-			}
+	defer func() {
+		unusedIgnores := findUnusedIgnores(vcis, mappings)
+		if len(unusedIgnores) == 0 {
 			return
 		}
+		log.InfoContext(
+			ctx,
+			"some of the CVE ignores were not relevant to any image",
+			slog.String("cves", strings.Join(unusedIgnores, ", ")),
+		)
+	}()
 
-		//  we can write a more user friendly error report out here
-		return
+	ices := map[string][]cveInst{}
+
+	for imgName, img := range mappings {
+		for _, cve := range img.VulnCheckResult.Rejected {
+			ices[cve.ID] = append(ices[cve.ID], cveInst{
+				Image: imgName,
+				CVE:   cve.CVE,
+			})
+		}
 	}
 
-	log.ErrorContext(ctx, fmt.Errorf("vulncheck failed, %w", err).Error())
+	if len(ices) > 0 {
+		for _, id := range slices.Sorted(maps.Keys(ices)) {
+			instances := ices[id]
+			var imgs []string
+			var desc string
+			var cvss, risk float32
+
+			for _, inst := range instances {
+				imgs = append(imgs, inst.Image)
+				if len(desc) < len(inst.CVE.Desc) {
+					desc = inst.CVE.Desc
+				}
+				if cvss < inst.CVE.CVSS {
+					cvss = inst.CVE.CVSS
+				}
+				if risk < inst.CVE.Risk {
+					risk = inst.CVE.Risk
+				}
+			}
+
+			args := []any{
+				slog.String("cve", id),
+				slog.Float64("cvss", float64(cvss)),
+				slog.Float64("risk", float64(risk)),
+				slog.String("cve_desc", desc),
+				slog.String("images", strings.Join(imgs, ",")),
+			}
+
+			log.ErrorContext(
+				ctx,
+				"Unacceptable vulnerability",
+				args...,
+			)
+		}
+		return errors.New("found unacceptable CVEs")
+	}
+
+	return nil
 }
 
 func main() {
@@ -748,7 +768,40 @@ func main() {
 
 	err = app.checkVulns(ctx, mappings)
 	if err != nil {
-		logVulnCheckErrs(ctx, app.log, err)
+		// TODO(tcm): should probably factor this out to a func
+		if errsI, ok := err.(interface{ Unwrap() []error }); ok {
+			for _, err := range errsI.Unwrap() {
+				if err, ok := errors.AsType[*reimage.ExecVulncheckCommandError](err); ok && err != nil {
+					attrs := []any{
+						slog.String("err", err.Error()),
+						slog.String("image", err.Image),
+						slog.String("cmd", strings.Join(err.Command, " ")),
+					}
+					execErr := &exec.ExitError{}
+					if errors.As(err.Err, &execErr) {
+						attrs = append(attrs, slog.String("stderr", string(execErr.Stderr)))
+					}
+
+					app.log.ErrorContext(
+						ctx,
+						"vulncheck exec failed",
+						attrs...,
+					)
+				}
+			}
+		} else {
+			app.log.ErrorContext(
+				ctx,
+				"vulncheck  failed",
+				slog.String("err", err.Error()),
+			)
+		}
+
+		os.Exit(1)
+	}
+
+	err = reportVulnCheckResult(ctx, app.log, app.VulnCheckIgnoreCVESpec, mappings)
+	if err != nil {
 		os.Exit(1)
 	}
 
