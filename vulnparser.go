@@ -7,7 +7,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"os/exec"
+	"slices"
 	"strings"
 
 	"github.com/google/go-containerregistry/pkg/name"
@@ -161,5 +163,34 @@ func (vc *ExecVulnGetter) GetVulnerabilities(ctx context.Context, dig name.Diges
 		return nil, err
 	}
 
-	return tr.ParseReport()
+	raw, err := tr.ParseReport()
+	if err != nil {
+		return nil, err
+	}
+	if len(raw) == 0 {
+		return nil, nil
+	}
+
+	dedupe := map[string]CVE{}
+	for _, c := range raw {
+		existing, _ := dedupe[c.ID]
+		if existing.CVSS > c.CVSS {
+			c.CVSS = existing.CVSS
+		}
+		if existing.Risk > c.Risk {
+			c.Risk = existing.Risk
+		}
+		if len(existing.Desc) > len(c.Desc) {
+			c.Desc = existing.Desc
+		}
+		dedupe[c.ID] = c
+	}
+
+	keys := slices.Sorted(maps.Keys(dedupe))
+	res := make([]CVE, len(keys))
+	for i := range keys {
+		res[i] = dedupe[keys[i]]
+	}
+
+	return res, nil
 }
