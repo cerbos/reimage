@@ -16,7 +16,6 @@ import (
 	"net/http"
 	"regexp"
 	"slices"
-	"sort"
 	"strings"
 	"text/template"
 
@@ -49,13 +48,14 @@ var (
 	// DefaultTemplateStr is a sensible default for importing images.
 	DefaultTemplateStr = `{{ .RemotePath }}/{{ .Registry }}/{{ .Repository }}:{{ .DigestHex }}`
 
+	DefaultRulesConfigImageJSONP = `$.spec.image`
 	// DefaultRulesConfig is a set of additional, non-core rules for known existing image
 	// locations.
 	DefaultRulesConfig = []JSONImageFinderConfig{
 		{
 			Kind:       "^Prometheus$",
 			APIVersion: `^monitoring\.coreos\.com/v1$`,
-			ImageJSONP: []string{"$.spec.image"},
+			ImageJSONP: []string{DefaultRulesConfigImageJSONP},
 		},
 	}
 
@@ -271,14 +271,32 @@ func needsUpdate(newRef name.Reference, old name.Digest, log Logger) (bool, erro
 	return true, nil
 }
 
+type CVE struct {
+	ID   string
+	CVSS float32
+	Risk float32
+	Desc string
+}
+
+type RejectedCVE struct {
+	CVE
+	Reason string
+}
+
+// VulnCheckResult is the result of a vulnerability check.
+type VulnCheckResult struct {
+	Ignored  []CVE         // CVEs that were present, but explicitly ignored by the checker.
+	Accepted []CVE         // CVEs that were present, but accepted by the CVE constraints.
+	Rejected []RejectedCVE // CVEs that were present and rejected  by the CVE constratins.
+}
+
 // QualifiedImage describes an image tag, at a specific digest.
 //
-//nolint:tagliatelle
+
 type QualifiedImage struct {
-	Tag         string   `json:"tag"`
-	Digest      string   `json:"digest"`
-	IgnoredCVEs []string `json:"ignoredCVEs,omitempty"`
-	FoundCVEs   []string `json:"foundCVEs,omitempty"`
+	Tag             string          `json:"tag"`
+	Digest          string          `json:"digest"`
+	VulnCheckResult VulnCheckResult `json:"vulncheckResult"`
 }
 
 // StaticRemapper is a Remapper implementation that allows statically mapping
@@ -883,7 +901,7 @@ func CompileJSONImageFinders(jmCfgs []JSONImageFinderConfig) (ImagesFinder, erro
 // VulnGetter is an interface to any tool that can retrieve vulnerabilities for
 // a given docker image digest.
 type VulnGetter interface {
-	GetVulnerabilities(ctx context.Context, dig name.Digest) ([]ImageVulnerability, error)
+	GetVulnerabilities(ctx context.Context, dig name.Digest) ([]CVE, error)
 }
 
 // VulnChecker checks that images have been scanned, and checks that
@@ -894,47 +912,7 @@ type VulnChecker struct {
 	IgnoreImages    *regexp.Regexp
 	CVEIgnoreConfig *VulnCheckIgnoreCVESpec
 	MaxCVSS         float32
-}
-
-// ImageCheckError is returned by Check if unwanted vulnerabilities are found.
-type ImageCheckError struct {
-	CVEs map[string]struct {
-		Score float32
-		Desc  string
-	}
-	Image   string
-	MaxCVSS float32
-}
-
-func (ice *ImageCheckError) Error() string {
-	cvsStrs := []string{}
-	for cve, data := range ice.CVEs {
-		cvsStrs = append(cvsStrs, fmt.Sprintf("%s(%.2f)", cve, data.Score))
-	}
-	sort.Strings(cvsStrs)
-
-	str := fmt.Sprintf(
-		"image %s has %d CVEs with score > %.2f: %s",
-		ice.Image,
-		len(ice.CVEs),
-		ice.MaxCVSS,
-		strings.Join(cvsStrs, ","),
-	)
-
-	return str
-}
-
-// ImageVulnerability describes a given CVE by ID and score.
-type ImageVulnerability struct {
-	ID   string
-	CVSS float32
-	Desc string
-}
-
-// VulnCheckResult is the result of a vulnerability check.
-type VulnCheckResult struct {
-	Ignored []string // CVEs that were present, but explicitly ignored by the checker.
-	Found   []string // CVEs that were present, but under the max requested CVSS.
+	MaxRisk         float32
 }
 
 // Check waits for a completed vulnerability discovery, and then check that an image
@@ -952,40 +930,28 @@ func (vc *VulnChecker) Check(ctx context.Context, dig name.Digest) (*VulnCheckRe
 		return nil, err
 	}
 
-	if vc.MaxCVSS == 0 {
+	if vc.MaxCVSS == 0 && vc.MaxRisk == 0 {
 		return &res, nil
 	}
 
-	badCVEs := map[string]struct {
-		Score float32
-		Desc  string
-	}{}
 	for _, cve := range cves {
 		score := cve.CVSS
+		risk := cve.Risk
 		id := cve.ID
-		if score > vc.MaxCVSS {
+		if (vc.MaxCVSS != 0 && score > vc.MaxCVSS) || (vc.MaxRisk > 0 && risk > vc.MaxRisk) {
 			if vc.CVEIgnoreConfig.IsIgnored(ctx, dig.Name(), id) {
-				res.Ignored = append(res.Ignored, fmt.Sprintf("%s:%f", id, score))
+				res.Ignored = append(res.Ignored, cve)
 				continue
 			}
-			badCVEs[id] = struct {
-				Score float32
-				Desc  string
-			}{
-				Score: score,
-				Desc:  cve.Desc,
-			}
+			res.Rejected = append(
+				res.Rejected,
+				RejectedCVE{
+					CVE:    cve,
+					Reason: "CVE risk/score is above request thresholds",
+				})
 			continue
 		}
-		res.Found = append(res.Found, fmt.Sprintf("%s:%f", id, score))
-	}
-
-	if len(badCVEs) != 0 {
-		return nil, &ImageCheckError{
-			Image:   dig.Name(),
-			MaxCVSS: vc.MaxCVSS,
-			CVEs:    badCVEs,
-		}
+		res.Accepted = append(res.Accepted, cve)
 	}
 
 	return &res, nil
@@ -1050,4 +1016,14 @@ func (f *VulnCheckIgnoreCVESpec) IsIgnored(_ context.Context, img, cve string) b
 		}
 	}
 	return false
+}
+
+func (f *VulnCheckIgnoreCVESpec) AllCVEs() []string {
+	var allCVEs []string
+	for vs := range maps.Values(f.raw) {
+		allCVEs = append(allCVEs, vs...)
+	}
+	slices.Sort(allCVEs)
+
+	return slices.Compact(allCVEs)
 }

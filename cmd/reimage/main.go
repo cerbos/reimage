@@ -17,6 +17,7 @@ import (
 	"maps"
 	"os"
 	"os/exec"
+	"path"
 	"regexp"
 	"slices"
 	"strings"
@@ -26,6 +27,7 @@ import (
 
 	containeranalysis "cloud.google.com/go/containeranalysis/apiv1"
 	kms "cloud.google.com/go/kms/apiv1"
+	"github.com/Masterminds/sprig/v3"
 	"github.com/buildkite/shellwords"
 	"github.com/google/go-containerregistry/pkg/crane"
 	"github.com/google/go-containerregistry/pkg/name"
@@ -72,8 +74,12 @@ type app struct {
 	VulnCheckFormat        string
 	VulnCheckIgnoreCVESpec *reimage.VulnCheckIgnoreCVESpec
 	VulnCheckMaxCVSS       float64
+	VulnCheckMaxRisk       float64
 	VulnCheckTimeout       time.Duration
 	VulnCheckMaxRetries    int
+	VulnCheckReportTmpl    string
+	vulncheckReportTmpl    *template.Template
+	VulnCheckReportOutput  string
 	Version                bool
 	VerifyStaticMappings   bool
 	DryRun                 bool
@@ -118,8 +124,11 @@ func setup(ctx context.Context) (*app, error) {
 	flag.IntVar(&a.VulnCheckMaxRetries, "vulncheck-max-retries", defaultVulcheckRetries, "max number of attempts to check for vulnerabilitie")
 	flag.Var(a.VulnCheckIgnoreCVESpec, "vulncheck-ignore-cve-list", "comma separated list of vulnerabilities to ignore")
 	flag.Float64Var(&a.VulnCheckMaxCVSS, "vulncheck-max-cvss", 0.0, "maximum CVSS vulnerabitility score")
+	flag.Float64Var(&a.VulnCheckMaxRisk, "vulncheck-max-risk", 0.0, "maximum vulnerabitility risk score")
 	flag.StringVar(&a.VulnCheckIgnoreImages, "vulncheck-ignore-images", "", "regexp of images to skip for CVE checks")
 	flag.StringVar(&a.VulnCheckMethod, "vulncheck-method", "exec", "force the vulnerability check method, (exec or grafeas)")
+	flag.StringVar(&a.VulnCheckReportTmpl, "vulncheck-report-template", "", "a file containing a template to render for vulncheck reporting")
+	flag.StringVar(&a.VulnCheckReportOutput, "vulncheck-report-output", "", "a file to write the vulncheck report to")
 
 	flag.StringVar(&a.GrafeasParent, "grafeas-parent", "", "value for the parent of the grafeas client (e.g. \"project/my-project-id\" for GCP")
 
@@ -202,6 +211,20 @@ func setup(ctx context.Context) (*app, error) {
 		a.inputFn = reimage.ProcessRawYAML
 	default:
 		return &a, errors.New("invalid input type, should be k8s or yaml")
+	}
+
+	if a.VulnCheckReportTmpl != "" {
+		a.vulncheckReportTmpl, err = template.New(path.Base(a.VulnCheckReportTmpl)).
+			Funcs(sprig.TxtFuncMap()).
+			ParseFiles(a.VulnCheckReportTmpl)
+		if err != nil {
+			return &a, fmt.Errorf("failed parsing vulncheck report template, %w", err)
+		}
+	}
+
+	if a.vulncheckReportTmpl != nil && a.VulnCheckReportOutput == "" ||
+		a.vulncheckReportTmpl == nil && a.VulnCheckReportOutput != "" {
+		return &a, errors.New("vulncheck reporting requires both the template and output to be set")
 	}
 
 	return &a, nil
@@ -294,6 +317,11 @@ func (a *app) readStaticMappings(confirmDigests bool) (*reimage.StaticRemapper, 
 }
 
 func (a *app) writeMappings(ctx context.Context, mappings map[string]reimage.QualifiedImage) (err error) {
+	if a.WriteMappings == "" && a.WriteMappingsImg == "" {
+		a.log.DebugContext(ctx, "skipping writing of mappings, no location requested")
+		return nil
+	}
+
 	bs, err := json.Marshal(mappings)
 	if err != nil {
 		return fmt.Errorf("could not marshal mappings, %w", err)
@@ -304,7 +332,6 @@ func (a *app) writeMappings(ctx context.Context, mappings map[string]reimage.Qua
 		return nil
 	}
 
-	a.log.InfoContext(ctx, "writing mappings file", "file", a.WriteMappings)
 	if a.WriteMappings != "" {
 		a.log.InfoContext(ctx, "writing mappings file", "file", a.WriteMappings)
 		err = os.WriteFile(a.WriteMappings, bs, defaultFSMask)
@@ -314,6 +341,7 @@ func (a *app) writeMappings(ctx context.Context, mappings map[string]reimage.Qua
 	}
 
 	if a.WriteMappingsImg != "" {
+		a.log.InfoContext(ctx, "writing mappings image", "file", a.WriteMappingsImg)
 		cnt := map[string][]byte{
 			"reimage-mapping.json": bs,
 		}
@@ -400,8 +428,8 @@ func (a *app) buildRemapper(checkDigests bool) (reimage.Remapper, *reimage.Recor
 
 // checkVulns most of this should move into the main package.
 func (a *app) checkVulns(ctx context.Context, imgs map[string]reimage.QualifiedImage) error {
-	if a.VulnCheckMaxCVSS == 0 {
-		a.log.InfoContext(ctx, "skipping vulnerability checks (max CVSS is set to 0)")
+	if a.VulnCheckMaxCVSS == 0 && a.VulnCheckMaxRisk == 0 {
+		a.log.InfoContext(ctx, "skipping vulnerability checks (max CVSS and risk are set to 0)")
 		return nil
 	}
 
@@ -441,6 +469,7 @@ func (a *app) checkVulns(ctx context.Context, imgs map[string]reimage.QualifiedI
 		Getter:          vget,
 		IgnoreImages:    a.vulnCheckIgnoreImages,
 		MaxCVSS:         float32(a.VulnCheckMaxCVSS),
+		MaxRisk:         float32(a.VulnCheckMaxRisk),
 		CVEIgnoreConfig: a.VulnCheckIgnoreCVESpec,
 	}
 
@@ -458,7 +487,7 @@ func (a *app) checkVulns(ctx context.Context, imgs map[string]reimage.QualifiedI
 			a.log.DebugContext(ctx, "start checks on", "img", img.Tag)
 			ref, err := name.ParseReference(img.Tag)
 			if err != nil {
-				errs[i] = fmt.Errorf("could not parse ref %q, %w", img, err)
+				errs[i] = fmt.Errorf("could not parse ref %q, %w", img.Tag, err)
 				return
 			}
 
@@ -472,8 +501,9 @@ func (a *app) checkVulns(ctx context.Context, imgs map[string]reimage.QualifiedI
 
 			resLock.Lock()
 			defer resLock.Unlock()
-			img.FoundCVEs = cres.Found
-			img.IgnoredCVEs = cres.Ignored
+			if cres != nil {
+				img.VulnCheckResult = *cres
+			}
 			res[src] = img
 		}(src, img, i)
 
@@ -560,7 +590,7 @@ func (a *app) attestImages(ctx context.Context, imgs map[string]reimage.Qualifie
 	for _, img := range imgs {
 		ref, ierr := name.ParseReference(img.Tag)
 		if ierr != nil {
-			errs[i] = fmt.Errorf("could not parse ref %q, %w", img, ierr)
+			errs[i] = fmt.Errorf("could not parse ref %q, %w", img.Tag, ierr)
 			continue
 		}
 
@@ -598,48 +628,108 @@ func (a *app) attestImages(ctx context.Context, imgs map[string]reimage.Qualifie
 	return errors.Join(errs...)
 }
 
-func logVulnCheckErrs(ctx context.Context, log *slog.Logger, err error) {
-	if errsI, ok := err.(interface{ Unwrap() []error }); ok {
-		for _, err := range errsI.Unwrap() {
-			if err, ok := errors.AsType[*reimage.ImageCheckError](err); ok && err != nil {
-				for _, cve := range slices.Sorted(maps.Keys(err.CVEs)) {
-					log.ErrorContext(
-						ctx,
-						"Unacceptable vulnerability",
-						slog.String("image", err.Image),
-						slog.String("cve", cve),
-						slog.Float64("cvss", float64(err.CVEs[cve].Score)),
-						slog.String("cve_desc", err.CVEs[cve].Desc),
-					)
-				}
-				continue
-			}
-			if err, ok := errors.AsType[*reimage.ExecVulncheckCommandError](err); ok && err != nil {
-				attrs := []any{
-					slog.String("err", err.Error()),
-					slog.String("image", err.Image),
-					slog.String("cmd", strings.Join(err.Command, " ")),
-				}
-				execErr := &exec.ExitError{}
-				if errors.As(err.Err, &execErr) {
-					attrs = append(attrs, slog.String("stderr", string(execErr.Stderr)))
-				}
+func findUnusedIgnores(spec *reimage.VulnCheckIgnoreCVESpec, mappings map[string]reimage.QualifiedImage) []string {
+	usedIgnores := map[string]struct{}{}
 
-				log.ErrorContext(
-					ctx,
-					"vulncheck exec failed",
-					attrs...,
-				)
-				continue
-			}
-
-			log.ErrorContext(ctx, fmt.Errorf("vulncheck failed, %w", err).Error())
+	for _, qi := range mappings {
+		for _, ii := range qi.VulnCheckResult.Ignored {
+			usedIgnores[ii.ID] = struct{}{}
 		}
-
-		return
 	}
 
-	log.ErrorContext(ctx, fmt.Errorf("vulncheck failed, %w", err).Error())
+	var unusedIgnores []string
+	for _, id := range spec.AllCVEs() {
+		if _, ok := usedIgnores[id]; ok {
+			continue
+		}
+		unusedIgnores = append(unusedIgnores, id)
+	}
+
+	return unusedIgnores
+}
+
+func (a *app) reportVulnCheckResult(ctx context.Context, mappings map[string]reimage.QualifiedImage) error {
+	unusedIgnores := findUnusedIgnores(a.VulnCheckIgnoreCVESpec, mappings)
+
+	vcrd := reimage.VulnCheckReportData{
+		UnusedIgnores: unusedIgnores,
+		Mappings:      mappings,
+		Rejections:    make(map[string]reimage.VulnCheckReportDataRejection),
+	}
+
+	defer func() {
+		if len(unusedIgnores) != 0 {
+			a.log.InfoContext(
+				ctx,
+				"some of the CVE ignores were not relevant to any image",
+				slog.String("cves", strings.Join(unusedIgnores, ", ")),
+			)
+		}
+
+		if a.VulnCheckReportOutput == "" {
+			return
+		}
+
+		tout, terr := os.Create(a.VulnCheckReportOutput)
+		if terr != nil {
+			a.log.ErrorContext(
+				ctx,
+				"failed to open vulncheck report file",
+				slog.String("err", terr.Error()),
+			)
+			return
+		}
+		defer tout.Close()
+
+		terr = a.vulncheckReportTmpl.Execute(tout, vcrd)
+		if terr != nil {
+			a.log.ErrorContext(
+				ctx,
+				"failed to render vulncheck report",
+				slog.String("err", terr.Error()),
+			)
+		}
+	}()
+
+	for imgName, img := range mappings {
+		for _, cve := range img.VulnCheckResult.Rejected {
+			cved, ok := vcrd.Rejections[cve.ID]
+			if !ok {
+				cved.RejectedCVE = cve
+			}
+			cved.Images = append(cved.Images, imgName)
+			vcrd.Rejections[cve.ID] = cved
+		}
+	}
+
+	if len(vcrd.Rejections) > 0 {
+		for _, id := range slices.Sorted(maps.Keys(vcrd.Rejections)) {
+			rej := vcrd.Rejections[id]
+			slices.Sort(rej.Images)
+			rej.Images = slices.DeleteFunc(slices.Compact(rej.Images), func(s string) bool {
+				return s == ""
+			})
+
+			vcrd.Rejections[id] = rej
+
+			args := []any{
+				slog.String("cve", id),
+				slog.Float64("cvss", float64(rej.CVSS)),
+				slog.Float64("risk", float64(rej.Risk)),
+				slog.String("cve_desc", rej.Desc),
+				slog.String("images", strings.Join(rej.Images, ",")),
+			}
+
+			a.log.ErrorContext(
+				ctx,
+				"Unacceptable vulnerability",
+				args...,
+			)
+		}
+		return errors.New("found unacceptable CVEs")
+	}
+
+	return nil
 }
 
 func main() {
@@ -702,8 +792,41 @@ func main() {
 	}
 
 	err = app.checkVulns(ctx, mappings)
+	if err != nil { //nolint:nestif
+		// TODO(tcm): should probably factor this out to a func
+		if errsI, ok := err.(interface{ Unwrap() []error }); ok {
+			for _, err := range errsI.Unwrap() {
+				if err, ok := errors.AsType[*reimage.ExecVulncheckCommandError](err); ok && err != nil {
+					attrs := []any{
+						slog.String("err", err.Error()),
+						slog.String("image", err.Image),
+						slog.String("cmd", strings.Join(err.Command, " ")),
+					}
+					execErr := &exec.ExitError{}
+					if errors.As(err.Err, &execErr) {
+						attrs = append(attrs, slog.String("stderr", string(execErr.Stderr)))
+					}
+
+					app.log.ErrorContext(
+						ctx,
+						"vulncheck exec failed",
+						attrs...,
+					)
+				}
+			}
+		} else {
+			app.log.ErrorContext(
+				ctx,
+				"vulncheck  failed",
+				slog.String("err", err.Error()),
+			)
+		}
+
+		os.Exit(1)
+	}
+
+	err = app.reportVulnCheckResult(ctx, mappings)
 	if err != nil {
-		logVulnCheckErrs(ctx, app.log, err)
 		os.Exit(1)
 	}
 

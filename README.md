@@ -108,8 +108,8 @@ $ helm template \
 
 If vulnerability scanning (see below) is performed when the mappings are being
 written, the CVEs that exist in an image (but are below the max CVSS score, or
-explicitly ignored), are included in the image. This makes it easy to audit
-CVEs for a specific image.
+explicitly ignored), are included in the image mapping information. This makes
+it easy to audit CVEs for a specific image.
 
 The following flags control mappings usage
 
@@ -128,29 +128,38 @@ The following flags control mappings usage
 ```
 # Grafeas Vulnerability Checking
 
-Alternatively, reimage can execute any command compatible with trivy's image scanning
-JSON output to scan images.
+reimage can execute any command compatible with the grype or trivy image scanning JSON
+output to scan images.
 
-alternatively trivy can check for Grafeas Discovery occurrences containing CVE checks for
+Alternatively trivy can check for Grafeas Discovery occurrences containing CVE checks for
 the discovered images. If discovery checking is enabled, but no completed discovery
-has occurred, reimage will wait for a configurable time. Vulnerability checking
-is disabled by default, and can be enabled by setting `-vulncheck-max-cvss`. If you
-want to scan, but ignore all CVEs, use `-vulncheck-max-cvss 11`
+has occurred, reimage will wait for a configurable time.
+
+Vulnerability checking is disabled by default, and can be enabled by setting
+`-vulncheck-max-cvss`. If you want to scan, but ignore all CVEs, use
+`-vulncheck-max-cvss 11`. Since CVSS itself can be difficult to work with, reimage
+also allows you to acceptable CVEs by grype's risk score via
+`-vulncheck-max-risk` (currently only supported if you are using the grype-json
+output format, that may change in future).
 
 
 ```
   -grafeas-parent string
         value for the parent of the grafeas client (e.g. "project/my-project-id" for GCP
-  -trivy-command string
-        the command to run to retrieve vulnerability scans in trivy's JSON format (the image id will be added as an additional arg (default "trivy image -f json")
+  -vulncheck-command string
+        the command to run to retrieve vulnerability scans in trivy's JSON format (the image id will be added as an additional arg (default "grype --by-cve -o json")
+  -vulncheck-format string
+        the output format of the vulncheck-command (trivy-json,grype-json) (default "grype-json")
   -vulncheck-method string
-        force the vulnerability check method, (trivy or grafeas) (default "trivy")
+        force the vulnerability check method, (exec or grafeas) (default "exec")
   -vulncheck-ignore-cve-list string
         comma separated list of vulnerabilities to ignore
   -vulncheck-ignore-images string
         regexp of images to skip for CVE checks
   -vulncheck-max-cvss float
         maximum CVSS vulnerabitility score
+  -vulncheck-max-risk float
+        maximum grype risk vulnerabitility score
   -vulncheck-timeout duration
         how long to wait for vulnerability scanning to complete (default 5m0s)
 ```

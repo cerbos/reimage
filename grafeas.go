@@ -84,7 +84,7 @@ func (vc *GrafeasVulnGetter) getVulnerabilities(ctx context.Context, dig name.Di
 }
 
 // Check checks an individual image.
-func (vc *GrafeasVulnGetter) check(ctx context.Context, dig name.Digest) ([]ImageVulnerability, error) {
+func (vc *GrafeasVulnGetter) check(ctx context.Context, dig name.Digest) ([]CVE, error) {
 	disc, err := vc.getDiscovery(ctx, dig)
 	if err != nil {
 		return nil, err
@@ -102,14 +102,15 @@ func (vc *GrafeasVulnGetter) check(ctx context.Context, dig name.Digest) ([]Imag
 		return nil, err
 	}
 
-	res := make([]ImageVulnerability, len(voccs))
+	res := make([]CVE, len(voccs))
 
 	for i, vocc := range voccs {
 		score := vocc.GetCvssScore()
 		cve := vocc.GetShortDescription()
-		res[i] = ImageVulnerability{
+		res[i] = CVE{
 			ID:   cve,
 			CVSS: score,
+			// Can we calculate a Grype style Risk from a grafaes report?
 		}
 	}
 
@@ -120,12 +121,12 @@ var baseDelay = 500 * time.Millisecond
 
 // GetVulnerabilities waits for a completed vulnerability discovery, and then check that an image
 // has no CVEs that violate the configured policy.
-func (vc *GrafeasVulnGetter) GetVulnerabilities(ctx context.Context, dig name.Digest) ([]ImageVulnerability, error) {
+func (vc *GrafeasVulnGetter) GetVulnerabilities(ctx context.Context, dig name.Digest) ([]CVE, error) {
 	var err error
 	img := dig.String()
 
 	for i := 0; i <= vc.RetryMax; i++ {
-		var res []ImageVulnerability
+		var res []CVE
 		res, err = vc.check(ctx, dig)
 		if err == nil {
 			return res, nil
