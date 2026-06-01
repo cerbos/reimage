@@ -48,13 +48,14 @@ var (
 	// DefaultTemplateStr is a sensible default for importing images.
 	DefaultTemplateStr = `{{ .RemotePath }}/{{ .Registry }}/{{ .Repository }}:{{ .DigestHex }}`
 
+	DefaultRulesConfigImageJSONP = `$.spec.image`
 	// DefaultRulesConfig is a set of additional, non-core rules for known existing image
 	// locations.
 	DefaultRulesConfig = []JSONImageFinderConfig{
 		{
 			Kind:       "^Prometheus$",
 			APIVersion: `^monitoring\.coreos\.com/v1$`,
-			ImageJSONP: []string{"$.spec.image"},
+			ImageJSONP: []string{DefaultRulesConfigImageJSONP},
 		},
 	}
 
@@ -291,7 +292,7 @@ type VulnCheckResult struct {
 
 // QualifiedImage describes an image tag, at a specific digest.
 //
-//nolint:tagliatelle
+
 type QualifiedImage struct {
 	Tag             string          `json:"tag"`
 	Digest          string          `json:"digest"`

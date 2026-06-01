@@ -224,7 +224,7 @@ func TestCompileJSONImageFinders(t *testing.T) {
 				{
 					Kind:       "^SomeCRD$",
 					APIVersion: "^somestartup.io$",
-					ImageJSONP: []string{"$.spec.image"},
+					ImageJSONP: []string{DefaultRulesConfigImageJSONP},
 				},
 			},
 			"",
@@ -242,7 +242,7 @@ func TestCompileJSONImageFinders(t *testing.T) {
 				{
 					Kind:       "^SomeCRD$",
 					APIVersion: "^somestartup.io$",
-					ImageJSONP: []string{"$.spec.image"},
+					ImageJSONP: []string{DefaultRulesConfigImageJSONP},
 				},
 			},
 			"",
@@ -260,7 +260,7 @@ func TestCompileJSONImageFinders(t *testing.T) {
 				{
 					Kind:       "^SomeCRD$",
 					APIVersion: "^somestartup.io$",
-					ImageJSONP: []string{"$.spec.image"},
+					ImageJSONP: []string{DefaultRulesConfigImageJSONP},
 				},
 			},
 			"",
@@ -278,7 +278,7 @@ func TestCompileJSONImageFinders(t *testing.T) {
 				{
 					Kind:       "^SomeCRD$",
 					APIVersion: "^somestartup.io$",
-					ImageJSONP: []string{"$.spec.image"},
+					ImageJSONP: []string{DefaultRulesConfigImageJSONP},
 				},
 			},
 			"",

@@ -224,7 +224,7 @@ func setup(ctx context.Context) (*app, error) {
 
 	if a.vulncheckReportTmpl != nil && a.VulnCheckReportOutput == "" ||
 		a.vulncheckReportTmpl == nil && a.VulnCheckReportOutput != "" {
-		return &a, fmt.Errorf("vulncheck reporting requires both the template and output to be set")
+		return &a, errors.New("vulncheck reporting requires both the template and output to be set")
 	}
 
 	return &a, nil
@@ -628,17 +628,6 @@ func (a *app) attestImages(ctx context.Context, imgs map[string]reimage.Qualifie
 	return errors.Join(errs...)
 }
 
-func reportUnusedIgnores(ctx context.Context, log *slog.Logger, unused []string) {
-	if len(unused) == 0 {
-		return
-	}
-	log.InfoContext(
-		ctx,
-		"unused CVE ignores",
-		slog.String("cves", strings.Join(unused, ", ")),
-	)
-}
-
 func findUnusedIgnores(spec *reimage.VulnCheckIgnoreCVESpec, mappings map[string]reimage.QualifiedImage) []string {
 	usedIgnores := map[string]struct{}{}
 
@@ -662,7 +651,7 @@ func findUnusedIgnores(spec *reimage.VulnCheckIgnoreCVESpec, mappings map[string
 func (a *app) reportVulnCheckResult(ctx context.Context, mappings map[string]reimage.QualifiedImage) error {
 	unusedIgnores := findUnusedIgnores(a.VulnCheckIgnoreCVESpec, mappings)
 
-	var vcrd = reimage.VulnCheckReportData{
+	vcrd := reimage.VulnCheckReportData{
 		UnusedIgnores: unusedIgnores,
 		Mappings:      mappings,
 		Rejections:    make(map[string]reimage.VulnCheckReportDataRejection),
@@ -717,8 +706,7 @@ func (a *app) reportVulnCheckResult(ctx context.Context, mappings map[string]rei
 		for _, id := range slices.Sorted(maps.Keys(vcrd.Rejections)) {
 			rej := vcrd.Rejections[id]
 			slices.Sort(rej.Images)
-			slices.Compact(rej.Images)
-			rej.Images = slices.DeleteFunc(rej.Images, func(s string) bool {
+			rej.Images = slices.DeleteFunc(slices.Compact(rej.Images), func(s string) bool {
 				return s == ""
 			})
 
@@ -804,7 +792,7 @@ func main() {
 	}
 
 	err = app.checkVulns(ctx, mappings)
-	if err != nil {
+	if err != nil { //nolint:nestif
 		// TODO(tcm): should probably factor this out to a func
 		if errsI, ok := err.(interface{ Unwrap() []error }); ok {
 			for _, err := range errsI.Unwrap() {

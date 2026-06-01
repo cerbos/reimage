@@ -173,7 +173,7 @@ func (vc *ExecVulnGetter) GetVulnerabilities(ctx context.Context, dig name.Diges
 
 	dedupe := map[string]CVE{}
 	for _, c := range raw {
-		existing, _ := dedupe[c.ID]
+		existing := dedupe[c.ID]
 		if existing.CVSS > c.CVSS {
 			c.CVSS = existing.CVSS
 		}
