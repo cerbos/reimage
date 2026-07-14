@@ -19,6 +19,7 @@ import (
 	"os/exec"
 	"path"
 	"regexp"
+	"runtime"
 	"slices"
 	"strings"
 	"sync"
@@ -80,6 +81,7 @@ type app struct {
 	VulnCheckReportTmpl    string
 	vulncheckReportTmpl    *template.Template
 	VulnCheckReportOutput  string
+	VulnCheckWorkers       int
 	Version                bool
 	VerifyStaticMappings   bool
 	DryRun                 bool
@@ -134,6 +136,7 @@ func setup(ctx context.Context) (*app, error) {
 
 	flag.StringVar(&a.VulnCheckCommand, "vulncheck-command", "grype --by-cve -o json", "the command to run to retrieve vulnerability scans in trivy's JSON format (the image id will be added as an additional arg")
 	flag.StringVar(&a.VulnCheckFormat, "vulncheck-format", "grype-json", fmt.Sprintf("the output format of the vulncheck-command (%s)", strings.Join(reimage.VulnOutputFormats, ",")))
+	flag.IntVar(&a.VulnCheckWorkers, "vulncheck-workers", runtime.GOMAXPROCS(0), "number of concurrent image vulnerability scans")
 
 	flag.StringVar(&a.BinAuthzAttestor, "binauthz-attestor", "", "Google BinAuthz Attestor (e.g. projects/myproj/attestors/myattestor)")
 
@@ -426,8 +429,40 @@ func (a *app) buildRemapper(checkDigests bool) (reimage.Remapper, *reimage.Recor
 	return rm, recorder, nil
 }
 
+func (a *app) checkVulnsOne(ctx context.Context, checker reimage.VulnChecker, imgs map[string]reimage.QualifiedImage, src string) (reimage.QualifiedImage, error) {
+	vcCtx, vcCancel := context.WithTimeoutCause(ctx, a.VulnCheckTimeout, errors.New("timeout waiting for vuln-check"))
+	defer vcCancel()
+
+	img := imgs[src]
+
+	a.log.DebugContext(ctx, "start checks on", "img", img.Tag)
+	defer a.log.DebugContext(ctx, "finished  checks on", "img", img.Tag)
+
+	ref, err := name.ParseReference(img.Tag)
+	if err != nil {
+		return img, fmt.Errorf("could not parse ref %q, %w", img.Tag, err)
+	}
+
+	dig := ref.Context().Registry.Repo(ref.Context().RepositoryStr()).Digest(img.Digest)
+
+	cres, err := checker.Check(vcCtx, dig)
+	if err != nil {
+		return img, fmt.Errorf("image check failed %q, %w", img.Tag, err)
+	}
+
+	if cres != nil {
+		img.VulnCheckResult = *cres
+	}
+	return img, nil
+}
+
 // checkVulns most of this should move into the main package.
 func (a *app) checkVulns(ctx context.Context, imgs map[string]reimage.QualifiedImage) error {
+	if len(imgs) == 0 {
+		a.log.InfoContext(ctx, "skipping vulnerability checks, no images to scan")
+		return nil
+	}
+
 	if a.VulnCheckMaxCVSS == 0 && a.VulnCheckMaxRisk == 0 {
 		a.log.InfoContext(ctx, "skipping vulnerability checks (max CVSS and risk are set to 0)")
 		return nil
@@ -437,11 +472,6 @@ func (a *app) checkVulns(ctx context.Context, imgs map[string]reimage.QualifiedI
 	if err != nil {
 		return fmt.Errorf("failed creating containeranalysis client, %w", err)
 	}
-
-	errs := make([]error, len(imgs))
-
-	wg := &sync.WaitGroup{}
-	wg.Add(len(imgs))
 
 	var vget reimage.VulnGetter
 
@@ -475,39 +505,49 @@ func (a *app) checkVulns(ctx context.Context, imgs map[string]reimage.QualifiedI
 
 	res := map[string]reimage.QualifiedImage{}
 	resLock := &sync.Mutex{}
+	errs := make(map[string]error)
+	errsLock := &sync.Mutex{}
 
-	i := 0
-	for src, img := range imgs {
-		go func(src string, img reimage.QualifiedImage, i int) {
+	srcImgs := make(chan string, len(imgs))
+	for src := range imgs {
+		srcImgs <- src
+	}
+	close(srcImgs)
+
+	a.log.InfoContext(ctx, "scanning images", slog.Int("imageCount", len(imgs)))
+
+	workCnt := a.VulnCheckWorkers
+	wg := &sync.WaitGroup{}
+	wg.Add(workCnt)
+	a.log.DebugContext(ctx, "started vulnerability workers", slog.Int("count", workCnt))
+
+	for range workCnt {
+		go func() {
 			defer wg.Done()
 
-			vcCtx, vcCancel := context.WithTimeoutCause(ctx, a.VulnCheckTimeout, errors.New("timeout waiting for vuln-check"))
-			defer vcCancel()
+			for src := range srcImgs {
+				select {
+				case src := <-srcImgs:
+					rimg, err := a.checkVulnsOne(ctx, checker, imgs, src)
+					if err != nil {
+						errsLock.Lock()
+						errs[src] = err
+						errsLock.Unlock()
+					}
 
-			a.log.DebugContext(ctx, "start checks on", "img", img.Tag)
-			ref, err := name.ParseReference(img.Tag)
-			if err != nil {
-				errs[i] = fmt.Errorf("could not parse ref %q, %w", img.Tag, err)
-				return
+					resLock.Lock()
+					res[src] = rimg
+					resLock.Unlock()
+				case <-ctx.Done():
+					errsLock.Lock()
+					errs[src] = ctx.Err()
+					errsLock.Unlock()
+					return
+				default:
+					return
+				}
 			}
-
-			dig := ref.Context().Registry.Repo(ref.Context().RepositoryStr()).Digest(img.Digest)
-
-			cres, err := checker.Check(vcCtx, dig)
-			if err != nil {
-				errs[i] = fmt.Errorf("image check failed %q, %w", img.Tag, err)
-				return
-			}
-
-			resLock.Lock()
-			defer resLock.Unlock()
-			if cres != nil {
-				img.VulnCheckResult = *cres
-			}
-			res[src] = img
-		}(src, img, i)
-
-		i++
+		}()
 	}
 
 	wg.Wait()
@@ -527,7 +567,11 @@ func (a *app) checkVulns(ctx context.Context, imgs map[string]reimage.QualifiedI
 
 	maps.Copy(imgs, res)
 
-	return errors.Join(errs...)
+	if len(errs) > 0 {
+		return errors.Join(slices.Collect(maps.Values(errs))...)
+	}
+
+	return nil
 }
 
 func (a *app) attestImages(ctx context.Context, imgs map[string]reimage.QualifiedImage) error {
@@ -805,6 +849,7 @@ func main() {
 					execErr := &exec.ExitError{}
 					if errors.As(err.Err, &execErr) {
 						attrs = append(attrs, slog.String("stderr", string(execErr.Stderr)))
+						attrs = append(attrs, slog.Int("exitCode", execErr.ExitCode()))
 					}
 
 					app.log.ErrorContext(
