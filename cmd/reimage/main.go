@@ -527,7 +527,12 @@ func (a *app) checkVulns(ctx context.Context, imgs map[string]reimage.QualifiedI
 
 			for src := range srcImgs {
 				select {
-				case src := <-srcImgs:
+				case <-ctx.Done():
+					errsLock.Lock()
+					errs[src] = ctx.Err()
+					errsLock.Unlock()
+					return
+				default:
 					rimg, err := a.checkVulnsOne(ctx, checker, imgs, src)
 					if err != nil {
 						errsLock.Lock()
@@ -538,13 +543,6 @@ func (a *app) checkVulns(ctx context.Context, imgs map[string]reimage.QualifiedI
 					resLock.Lock()
 					res[src] = rimg
 					resLock.Unlock()
-				case <-ctx.Done():
-					errsLock.Lock()
-					errs[src] = ctx.Err()
-					errsLock.Unlock()
-					return
-				default:
-					return
 				}
 			}
 		}()
