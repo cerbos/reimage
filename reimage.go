@@ -948,7 +948,8 @@ func (vc *VulnChecker) Check(ctx context.Context, dig name.Digest) (*VulnCheckRe
 				RejectedCVE{
 					CVE:    cve,
 					Reason: "CVE risk/score is above request thresholds",
-				})
+				},
+			)
 			continue
 		}
 		res.Accepted = append(res.Accepted, cve)
@@ -968,7 +969,7 @@ func (f *VulnCheckIgnoreCVESpec) String() string {
 
 	keys := maps.Keys(f.raw)
 	var b strings.Builder
-	fmt.Fprintf(&b, "%s\n", strings.Join((f.raw)[nil], ","))
+	fmt.Fprintf(&b, "%s\n", strings.Join(f.raw[nil], ","))
 	for k := range keys {
 		if k == nil {
 			continue

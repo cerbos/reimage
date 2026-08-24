@@ -378,7 +378,8 @@ func (a *app) setupLog() *slog.Logger {
 			os.Stderr,
 			&slog.HandlerOptions{
 				Level: slvl,
-			}),
+			},
+		),
 	)
 
 	a.log = log
@@ -418,8 +419,8 @@ func (a *app) buildRemapper(checkDigests bool) (reimage.Remapper, *reimage.Recor
 
 	if !a.NoCopy {
 		ensurer := &reimage.EnsureRemapper{
-			NoClobber: !(a.Clobber),
-			DryRun:    (a.DryRun),
+			NoClobber: !a.Clobber,
+			DryRun:    a.DryRun,
 
 			Logger: a.log,
 		}
