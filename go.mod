@@ -256,7 +256,6 @@ require (
 	github.com/golangci/unconvert v0.0.0-20250410112200-a129a6e6413e // indirect
 	github.com/google/certificate-transparency-go v1.3.3 // indirect
 	github.com/google/go-cmp v0.7.0 // indirect
-	github.com/google/go-github/v88 v88.0.0 // indirect
 	github.com/google/go-github/v89 v89.0.0 // indirect
 	github.com/google/go-querystring v1.2.0 // indirect
 	github.com/google/ko v0.19.1 // indirect
@@ -269,7 +268,7 @@ require (
 	github.com/goreleaser/chglog v0.7.4 // indirect
 	github.com/goreleaser/fileglob v1.4.0 // indirect
 	github.com/goreleaser/go-shellwords v1.0.13 // indirect
-	github.com/goreleaser/goreleaser/v2 v2.16.0 // indirect
+	github.com/goreleaser/goreleaser/v2 v2.17.1 // indirect
 	github.com/goreleaser/nfpm/v2 v2.47.0 // indirect
 	github.com/goreleaser/quill v0.0.0-20260630015114-8310f3e9a321 // indirect
 	github.com/gorilla/websocket v1.5.4-0.20250319132907-e064f32e3674 // indirect
