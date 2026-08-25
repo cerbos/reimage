@@ -46,7 +46,8 @@ jobs:
       uses: ./.github/actions/setup-go
 
     - name: Lint GitHub Actions
-      run: go tool actionlint -verbose
+      # TODO: This fails with go tool, seemingly having issues with yaml/v4
+      run: go run github.com/rhysd/actionlint@v1.7.12 -verbose
 
     - name: golangci-lint
       run: |
