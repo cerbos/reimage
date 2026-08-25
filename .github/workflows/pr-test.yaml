@@ -46,13 +46,11 @@ jobs:
       uses: ./.github/actions/setup-go
 
     - name: Lint GitHub Actions
-      working-directory: ./tools/actionslint
-      run: go tool -C ../../ github.com/rhysd/actionlint/cmd/actionlint
+      run: go tool actionlint -verbose
 
     - name: golangci-lint
-      working-directory: ./tools/golangcilint
       run: |
-        go tool -C ../../ github.com/golangci/golangci-lint/v2/cmd/golangci-lint --config=.golangci.yaml -v ./...
+        go tool golangci-lint --config=.golangci.yaml -v ./...
 
     - name: Test
       run: go test ./...

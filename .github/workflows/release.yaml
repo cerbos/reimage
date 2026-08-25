@@ -32,6 +32,5 @@ jobs:
       - name: GoReleaser
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        working-directory: ./tools/goreleaser
         run: |
-          go tool -C ../../ github.com/goreleaser/goreleaser/v2 release --config=.goreleaser.yml --clean
+          go tool goreleaser release --config=.goreleaser.yml --clean

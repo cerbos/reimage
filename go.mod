@@ -1,6 +1,6 @@
 module github.com/cerbos/reimage
 
-go 1.27.0
+go 1.27
 
 require (
 	cloud.google.com/go/containeranalysis v0.19.0

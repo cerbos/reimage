@@ -1,0 +1,8 @@
+go 1.27.0
+
+use (
+	.
+	./tools/golangci-lint
+	./tools/actionlint
+	./tools/goreleaser
+)

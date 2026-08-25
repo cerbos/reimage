@@ -1,4 +1,4 @@
-module goreleaser
+module github.com/cerbos/reimage/tools/goreleaser
 
 go 1.27.0
 

@@ -1,6 +1,7 @@
 version: "2"
 run:
-  go: "1.24"
+  go: "1.27"
+  relative-path-mode: gitroot
 linters:
   enable:
     - asasalint
@@ -112,8 +113,7 @@ formatters:
         - blank
         - dot
       custom-order: true
-    gofumpt:
-      extra-rules: true
+    gofumpt: {}
   exclusions:
     generated: lax
     paths: []
