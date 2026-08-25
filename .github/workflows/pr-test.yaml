@@ -47,11 +47,11 @@ jobs:
 
     - name: Lint GitHub Actions
       # TODO: This fails with go tool, seemingly having issues with yaml/v4
-      run: go run github.com/rhysd/actionlint@v1.7.12 -verbose
+      run: go tool -modfile=go-actionlint.mod  actionlint -verbose
 
     - name: golangci-lint
       run: |
-        go tool golangci-lint --config=.golangci.yaml -v ./...
+        go tool -modfile=go-golangci-lint.mod golangci-lint --config=.golangci.yaml -v ./...
 
     - name: Test
       run: go test ./...

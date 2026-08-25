@@ -33,4 +33,4 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          go tool goreleaser release --config=.goreleaser.yml --clean
+          go tool -modfile=go-goreleaser.mod goreleaser release --config=.goreleaser.yml --clean
