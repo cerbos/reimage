@@ -35,10 +35,7 @@
         "gomod"
       ],
       "groupName": "Go deps",
-      "groupSlug": "go-deps",
-      "postUpdateOptions": [
-        "gomodTidy1.27"
-      ]
+      "groupSlug": "go-deps"
     }
   ],
   "labels": [
