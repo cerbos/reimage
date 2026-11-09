@@ -3,22 +3,22 @@ module github.com/cerbos/reimage
 go 1.27.0
 
 require (
-	cloud.google.com/go/containeranalysis v0.20.0
-	cloud.google.com/go/grafeas v0.6.0
-	cloud.google.com/go/kms v1.35.0
+	cloud.google.com/go/containeranalysis v0.21.1
+	cloud.google.com/go/grafeas v0.6.1
+	cloud.google.com/go/kms v1.36.1
 	github.com/AsaiYusuke/jsonpath/v2 v2.2.0
 	github.com/Masterminds/sprig/v3 v3.3.0
 	github.com/buildkite/shellwords v1.0.1
 	github.com/google/go-containerregistry v0.22.1
 	github.com/googleapis/gax-go/v2 v2.27.0
-	google.golang.org/api v0.307.0
+	google.golang.org/api v0.310.0
 	google.golang.org/genproto v0.0.0-20261012220534-4341edf3f941
 	google.golang.org/protobuf v1.36.12
 	gopkg.in/yaml.v3 v3.0.1
-	k8s.io/api v0.37.1
-	k8s.io/apimachinery v0.37.1
-	k8s.io/cli-runtime v0.37.1
-	k8s.io/client-go v0.37.1
+	k8s.io/api v0.37.2
+	k8s.io/apimachinery v0.37.2
+	k8s.io/cli-runtime v0.37.2
+	k8s.io/client-go v0.37.2
 )
 
 require (
@@ -43,7 +43,7 @@ require (
 	github.com/go-logr/stdr v1.2.2 // indirect
 	github.com/google/s2a-go v0.1.11 // indirect
 	github.com/google/uuid v1.6.0 // indirect
-	github.com/googleapis/enterprise-certificate-proxy v0.3.23 // indirect
+	github.com/googleapis/enterprise-certificate-proxy v0.3.24 // indirect
 	github.com/huandu/xstrings v1.5.0 // indirect
 	github.com/json-iterator/go v1.1.12 // indirect
 	github.com/klauspost/compress v1.20.1 // indirect
